@@ -289,7 +289,7 @@ async function validateAssessmentPayload(body) {
   const classId = positiveInt(body.classId);
   const subjectId = positiveInt(body.subjectId);
   const title = textValue(body.title, 180);
-  const dueDate = typeof body.dueDate === "string" && /^\\d{4}-\\d{2}-\\d{2}$/.test(body.dueDate) ? body.dueDate : null;
+  const dueDate = typeof body.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.dueDate) ? body.dueDate : null;
   const details = typeof body.details === "string" ? body.details.trim().slice(0, 3000) : "";
   if (!classId || !subjectId || !title || !dueDate) return { error: "학급, 과목, 제목, 날짜를 모두 입력해 주세요." };
   const context = await db.query(
