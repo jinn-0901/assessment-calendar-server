@@ -209,7 +209,7 @@ app.get("/api/admin/registration-codes", requireAdmin, async (req, res, next) =>
   try {
     const result = await db.query(
       "SELECT id,expires_at,used_at,revoked_at,created_at FROM school_admin_registration_codes WHERE school_id=$1 ORDER BY created_at DESC LIMIT 20",
-      [req.session.admin.schoolId]
+      [(req.admin || req.session.admin).schoolId]
     );
     res.json({ codes: result.rows });
   } catch (error) { next(error); }
@@ -221,7 +221,7 @@ app.post("/api/admin/registration-codes/:id/revoke", requireAdmin, async (req, r
     if (!id) return res.status(400).json({ error: "코드 ID가 올바르지 않습니다." });
     const result = await db.query(
       "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE id=$1 AND school_id=$2 AND used_at IS NULL AND revoked_at IS NULL RETURNING id",
-      [id, req.session.admin.schoolId]
+      [id, (req.admin || req.session.admin).schoolId]
     );
     if (!result.rowCount) return res.status(404).json({ error: "폐기할 수 있는 코드를 찾을 수 없습니다." });
     res.json({ ok: true });
@@ -260,13 +260,13 @@ app.post("/api/admin/password", requireAdmin, async (req, res, next) => {
     }
     const result = await db.query(
       "SELECT password_hash FROM school_admins WHERE school_id=$1",
-      [req.session.admin.schoolId]
+      [(req.admin || req.session.admin).schoolId]
     );
     if (!result.rowCount || !(await bcrypt.compare(currentPassword, result.rows[0].password_hash))) {
       return res.status(403).json({ error: "현재 비밀번호가 올바르지 않습니다." });
     }
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    await db.query("UPDATE school_admins SET password_hash=$1 WHERE school_id=$2", [passwordHash, req.session.admin.schoolId]);
+    await db.query("UPDATE school_admins SET password_hash=$1 WHERE school_id=$2", [passwordHash, (req.admin || req.session.admin).schoolId]);
     res.json({ ok: true, message: "관리자 비밀번호가 변경되었습니다." });
   } catch (error) { next(error); }
 });
@@ -285,7 +285,7 @@ app.get("/api/admin/requests", requireAdmin, async (req, res, next) => {
       `SELECT r.id,r.school_id,r.assessment_id,r.action,r.payload,r.created_at,s.name AS school_name
        FROM assessment_requests r JOIN schools s ON s.id=r.school_id
        WHERE r.school_id=$1 AND r.status='pending' ORDER BY r.created_at ASC`,
-      [req.session.admin.schoolId]
+      [(req.admin || req.session.admin).schoolId]
     );
     res.json({ requests: result.rows });
   } catch (error) { next(error); }
@@ -300,7 +300,7 @@ app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next
     await client.query("BEGIN");
     const request = await client.query(
       "SELECT * FROM assessment_requests WHERE id=$1 AND school_id=$2 AND status='pending' FOR UPDATE",
-      [id, req.session.admin.schoolId]
+      [id, (req.admin || req.session.admin).schoolId]
     );
     if (!request.rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "대기 중인 요청을 찾을 수 없습니다." }); }
     const row = request.rows[0];
@@ -320,7 +320,7 @@ app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next
     }
     await client.query(
       "UPDATE assessment_requests SET status=$1, reviewed_at=NOW(), reviewed_by_school_admin=$2 WHERE id=$3",
-      [decision === "approve" ? "approved" : "rejected", req.session.admin.schoolId, id]
+      [decision === "approve" ? "approved" : "rejected", (req.admin || req.session.admin).schoolId, id]
     );
     await client.query("COMMIT");
     res.json({ ok: true });
