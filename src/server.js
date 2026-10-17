@@ -463,7 +463,7 @@ app.get("/api/neis/timetable", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120,
     const grade = typeof req.query.grade === "string" ? req.query.grade.trim() : "";
     const className = typeof req.query.className === "string" ? req.query.className.trim() : "";
     const from = validNeisDate(req.query.from || req.query.date);
-    if (!schoolId || !/^\\d{1,2}$/.test(grade) || !className || className.length > 10 || !from) return res.status(400).json({ error: "학교, 학년, 반, 시작 날짜를 확인해 주세요." });
+    if (!schoolId || !/^\d{1,2}$/.test(grade) || !className || className.length > 10 || !from) return res.status(400).json({ error: "학교, 학년, 반, 시작 날짜를 확인해 주세요." });
     const school = await getNeisSchool(schoolId);
     const schoolResult = await db.query("SELECT name FROM schools WHERE id=$1", [schoolId]);
     const schoolName = schoolResult.rows[0]?.name || "";
