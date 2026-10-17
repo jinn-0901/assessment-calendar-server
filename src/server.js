@@ -312,13 +312,13 @@ app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next
       const p = row.payload;
       if (row.action === "create") {
         await client.query(
-          "INSERT INTO assessments (class_id,subject_id,title,details,due_date,due_time,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,$6,NULL,FALSE)",
-          [p.classId,p.subjectId,p.title,p.details,p.dueDate,p.dueTime || null]
+          "INSERT INTO assessments (class_id,subject_id,title,details,due_date,due_time,start_date,end_date,start_time,end_time,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,FALSE)",
+          [p.classId,p.subjectId,p.title,p.details,p.endDate || p.dueDate,p.endTime ?? p.dueTime ?? null,p.startDate || p.dueDate,p.endDate || p.dueDate,p.startTime || null,p.endTime ?? p.dueTime ?? null]
         );
       } else if (row.action === "edit") {
         await client.query(
-          "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,due_time=$6,updated_at=NOW() WHERE id=$7",
-          [p.classId,p.subjectId,p.title,p.details,p.dueDate,p.dueTime || null,row.assessment_id]
+          "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,due_time=$6,start_date=$7,end_date=$8,start_time=$9,end_time=$10,updated_at=NOW() WHERE id=$11",
+          [p.classId,p.subjectId,p.title,p.details,p.endDate || p.dueDate,p.endTime ?? p.dueTime ?? null,p.startDate || p.dueDate,p.endDate || p.dueDate,p.startTime || null,p.endTime ?? p.dueTime ?? null,row.assessment_id]
         );
       }
     }
@@ -501,6 +501,10 @@ app.get("/api/assessments", async (req, res, next) => {
     const result = await db.query(
       `SELECT a.id, a.class_id, a.subject_id, a.title, a.details,
               to_char(a.due_date, 'YYYY-MM-DD') AS due_date,
+              to_char(a.start_date, 'YYYY-MM-DD') AS start_date,
+              to_char(a.end_date, 'YYYY-MM-DD') AS end_date,
+              to_char(a.start_time, 'HH24:MI') AS start_time,
+              to_char(a.end_time, 'HH24:MI') AS end_time,
               to_char(a.due_time, 'HH24:MI') AS due_time,
               a.created_by, CASE WHEN a.created_by_admin THEN '학교 관리자' ELSE COALESCE(u.display_name, '학생') END AS author, s.name AS subject_name,
               c.school_id, c.grade, c.class_number, sc.name AS school_name, sc.region
@@ -524,7 +528,8 @@ async function validateAssessmentPayload(body) {
   const dueDate = typeof body.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.dueDate) ? body.dueDate : null;
   const dueTime = body.dueTime == null || body.dueTime === "" ? null : (typeof body.dueTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.dueTime) ? body.dueTime : undefined);
   const details = typeof body.details === "string" ? body.details.trim().slice(0, 3000) : "";
-  if (!classId || !subjectId || !title || !dueDate || dueTime === undefined) return { error: "학급, 과목, 제목, 날짜와 시간을 확인해 주세요." };
+  if (!classId || !subjectId || !title || !startDate || !endDate || endDate < startDate || startTime === undefined || endTime === undefined) return { error: "학급, 과목, 제목, 시작·종료 날짜와 시간을 확인해 주세요." };
+  if (startDate === endDate && startTime && endTime && endTime < startTime) return { error: "종료 시간은 시작 시간보다 빠를 수 없습니다." };
   const context = await db.query(
     "SELECT c.school_id,s.school_id AS subject_school_id FROM classes c CROSS JOIN subjects s WHERE c.id=$1 AND s.id=$2",
     [classId, subjectId]
@@ -532,7 +537,7 @@ async function validateAssessmentPayload(body) {
   if (!context.rowCount || String(context.rows[0].school_id) !== String(context.rows[0].subject_school_id)) {
     return { error: "학급과 과목은 같은 학교에 속해야 합니다." };
   }
-  return { payload: { classId, subjectId, title, details, dueDate, dueTime }, schoolId: context.rows[0].school_id };
+  return { payload: { classId, subjectId, title, details, startDate, endDate, startTime, endTime, dueDate: endDate, dueTime: endTime }, schoolId: context.rows[0].school_id };
 }
 
 app.post("/api/assessments", async (req, res, next) => {
@@ -543,8 +548,8 @@ app.post("/api/assessments", async (req, res, next) => {
     if (admin) {
       if (String(admin.schoolId) !== String(validated.schoolId)) return res.status(403).json({ error: "관리자는 본인 학교의 일정만 등록할 수 있어요." });
       const result = await db.query(
-        "INSERT INTO assessments (class_id,subject_id,title,details,due_date,due_time,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,$6,NULL,TRUE) RETURNING id",
-        [validated.payload.classId, validated.payload.subjectId, validated.payload.title, validated.payload.details, validated.payload.dueDate, validated.payload.dueTime]
+        "INSERT INTO assessments (class_id,subject_id,title,details,due_date,due_time,start_date,end_date,start_time,end_time,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,TRUE) RETURNING id",
+        [validated.payload.classId, validated.payload.subjectId, validated.payload.title, validated.payload.details, validated.payload.endDate, validated.payload.endTime, validated.payload.startDate, validated.payload.endDate, validated.payload.startTime, validated.payload.endTime]
       );
       return res.status(201).json({ assessmentId: result.rows[0].id, message: "관리자 일정이 등록되어 바로 공개됐어요." });
     }
@@ -577,7 +582,7 @@ app.put("/api/assessments/:id", async (req, res, next) => {
       }
       await db.query(
         "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,due_time=$6,updated_at=NOW() WHERE id=$7",
-        [validated.payload.classId,validated.payload.subjectId,validated.payload.title,validated.payload.details,validated.payload.dueDate,validated.payload.dueTime,id]
+        [validated.payload.classId,validated.payload.subjectId,validated.payload.title,validated.payload.details,validated.payload.endDate,validated.payload.endTime,validated.payload.startDate,validated.payload.endDate,validated.payload.startTime,validated.payload.endTime,id]
       );
       return res.json({ message: "관리자 일정이 수정되어 바로 반영됐어요." });
     }
@@ -616,6 +621,11 @@ async function startServer() {
   try {
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS created_by_admin BOOLEAN NOT NULL DEFAULT FALSE");
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS due_time TIME");
+    await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS start_date DATE");
+    await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS end_date DATE");
+    await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS start_time TIME");
+    await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS end_time TIME");
+    await db.query("UPDATE assessments SET start_date = COALESCE(start_date, due_date), end_date = COALESCE(end_date, due_date), end_time = COALESCE(end_time, due_time) WHERE start_date IS NULL OR end_date IS NULL OR end_time IS NULL");
     await db.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
     await db.query("DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10)");
