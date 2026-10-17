@@ -192,6 +192,49 @@ app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next
   } finally { client.release(); }
 });
 
+
+app.get("/api/neis/schools", rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  if (query.length < 2 || query.length > 80) {
+    return res.status(400).json({ error: "학교 이름을 두 글자 이상 입력해 주세요." });
+  }
+  const key = process.env.NEIS_API_KEY;
+  if (!key) return res.status(503).json({ error: "학교 검색 API가 아직 설정되지 않았어요. 서버의 NEIS_API_KEY를 설정해 주세요." });
+
+  try {
+    const params = new URLSearchParams({
+      KEY: key,
+      Type: "json",
+      pIndex: "1",
+      pSize: "20",
+      SCHUL_NM: query
+    });
+    const response = await fetch("https://open.neis.go.kr/hub/schoolInfo?" + params.toString(), {
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) return res.status(502).json({ error: "나이스 학교 정보를 가져오지 못했어요. 잠시 후 다시 시도해 주세요." });
+    const payload = await response.json();
+    const rows = payload?.schoolInfo?.[1]?.row || [];
+    const errorResult = payload?.RESULT;
+    if (!rows.length && errorResult?.CODE && errorResult.CODE !== "INFO-200") {
+      return res.status(502).json({ error: "나이스 학교 검색에서 응답 오류가 발생했어요." });
+    }
+    res.json({
+      schools: rows.map((row) => ({
+        name: row.SCHUL_NM,
+        region: row.LCTN_SC_NM || row.ATPT_OFCDC_SC_NM || "",
+        address: row.ORG_RDNMA || row.ORG_RDNZC || "",
+        schoolType: row.SCHUL_KND_SC_NM || "",
+        officeCode: row.ATPT_OFCDC_SC_CODE,
+        schoolCode: row.SD_SCHUL_CODE
+      }))
+    });
+  } catch (error) {
+    console.error("NEIS school search failed:", error.message);
+    res.status(502).json({ error: "나이스 학교 검색에 연결할 수 없어요. 잠시 후 다시 시도해 주세요." });
+  }
+});
+
 app.get("/api/schools", async (req, res, next) => {
   try {
     const result = await db.query("SELECT id, name, region FROM schools ORDER BY name, region");
@@ -203,10 +246,15 @@ app.post("/api/schools", async (req, res, next) => {
   try {
     const name = textValue(req.body.name, 160);
     const region = typeof req.body.region === "string" ? req.body.region.trim().slice(0, 120) : "";
+    const officeCode = typeof req.body.officeCode === "string" ? req.body.officeCode.trim().slice(0, 10) : null;
+    const schoolCode = typeof req.body.schoolCode === "string" ? req.body.schoolCode.trim().slice(0, 20) : null;
     if (!name) return res.status(400).json({ error: "학교명을 입력해 주세요." });
+    if ((officeCode && !schoolCode) || (!officeCode && schoolCode)) {
+      return res.status(400).json({ error: "나이스 학교 코드 정보가 올바르지 않습니다." });
+    }
     const result = await db.query(
-      "INSERT INTO schools (name, region) VALUES ($1, $2) ON CONFLICT (name, region) DO UPDATE SET name = EXCLUDED.name RETURNING id, name, region",
-      [name, region]
+      "INSERT INTO schools (name, region, neis_office_code, neis_school_code) VALUES ($1, $2, $3, $4) ON CONFLICT (name, region) DO UPDATE SET neis_office_code = COALESCE(EXCLUDED.neis_office_code, schools.neis_office_code), neis_school_code = COALESCE(EXCLUDED.neis_school_code, schools.neis_school_code) RETURNING id, name, region",
+      [name, region, officeCode, schoolCode]
     );
     res.status(201).json({ school: result.rows[0] });
   } catch (error) { next(error); }
@@ -350,4 +398,15 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: "서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." });
 });
 
-app.listen(port, () => console.log(`Assessment Calendar server listening on port ${port}`));
+async function startServer() {
+  try {
+    await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10)");
+    await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_school_code VARCHAR(20)");
+    await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_schools_neis_codes ON schools(neis_office_code, neis_school_code) WHERE neis_office_code IS NOT NULL AND neis_school_code IS NOT NULL");
+  } catch (error) {
+    console.warn("School code migration skipped; database setup may be required:", error.message);
+  }
+  app.listen(port, () => console.log(`Assessment Calendar server listening on port ${port}`));
+}
+
+startServer();
