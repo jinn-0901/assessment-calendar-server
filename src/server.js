@@ -239,6 +239,43 @@ app.get("/api/neis/schools", rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, st
   }
 });
 
+app.get("/api/neis/classes", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
+  const schoolId = positiveInt(req.query.schoolId);
+  const grade = typeof req.query.grade === "string" ? req.query.grade.trim() : "";
+  if (!schoolId) return res.status(400).json({ error: "학교 선택이 올바르지 않습니다." });
+  if (grade && !/^\\d{1,2}$/.test(grade)) return res.status(400).json({ error: "학년 값이 올바르지 않습니다." });
+  const key = process.env.NEIS_API_KEY;
+  if (!key) return res.status(503).json({ error: "나이스 학급 조회 API가 설정되지 않았어요." });
+  try {
+    const schoolResult = await db.query("SELECT neis_office_code, neis_school_code FROM schools WHERE id=$1", [schoolId]);
+    const school = schoolResult.rows[0];
+    if (!school) return res.status(404).json({ error: "학교를 찾을 수 없습니다." });
+    if (!school.neis_office_code || !school.neis_school_code) {
+      return res.status(400).json({ error: "이 학교는 나이스 학교 코드가 없어 학급 정보를 조회할 수 없습니다. 학교를 나이스 검색으로 다시 등록해 주세요." });
+    }
+    const params = new URLSearchParams({
+      KEY: key, Type: "json", pIndex: "1", pSize: "1000",
+      ATPT_OFCDC_SC_CODE: school.neis_office_code,
+      SD_SCHUL_CODE: school.neis_school_code
+    });
+    if (grade) params.set("GRADE", grade);
+    const response = await fetch("https://open.neis.go.kr/hub/classInfo?" + params.toString(), { signal: AbortSignal.timeout(10000) });
+    if (!response.ok) return res.status(502).json({ error: "나이스 학급 정보를 가져오지 못했어요." });
+    const payload = await response.json();
+    const rows = payload?.classInfo?.[1]?.row || [];
+    const errorResult = payload?.RESULT;
+    if (!rows.length && errorResult?.CODE && errorResult.CODE !== "INFO-200") {
+      return res.status(502).json({ error: "나이스 학급 조회 오류: " + (errorResult.MESSAGE || errorResult.CODE) });
+    }
+    const grades = [...new Set(rows.map(row => String(row.GRADE || "").trim()).filter(Boolean))].sort((a,b) => Number(a)-Number(b));
+    const classes = [...new Set(rows.filter(row => !grade || String(row.GRADE || "").trim() === grade).map(row => String(row.CLASS_NM || "").trim()).filter(Boolean))].sort((a,b) => a.localeCompare(b, "ko", { numeric: true }));
+    res.json({ grades, classes });
+  } catch (error) {
+    console.error("NEIS class lookup failed:", error.message);
+    res.status(502).json({ error: "나이스 학급 조회에 연결할 수 없어요. 잠시 후 다시 시도해 주세요." });
+  }
+});
+
 app.get("/api/schools", async (req, res, next) => {
   try {
     const result = await db.query("SELECT id, name, region FROM schools ORDER BY name, region");
