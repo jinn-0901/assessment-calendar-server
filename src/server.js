@@ -219,8 +219,12 @@ app.get("/api/neis/schools", rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, st
     if (!rows.length && errorResult?.CODE && errorResult.CODE !== "INFO-200") {
       return res.status(502).json({ error: "나이스 학교 검색에서 응답 오류가 발생했어요." });
     }
+    // Moa is for secondary-school performance assessment schedules only.
+    const secondarySchools = rows.filter((row) =>
+      ["중학교", "고등학교"].includes((row.SCHUL_KND_SC_NM || "").trim())
+    );
     res.json({
-      schools: rows.map((row) => ({
+      schools: secondarySchools.map((row) => ({
         name: row.SCHUL_NM,
         region: row.LCTN_SC_NM || row.ATPT_OFCDC_SC_NM || "",
         address: row.ORG_RDNMA || row.ORG_RDNZC || "",
