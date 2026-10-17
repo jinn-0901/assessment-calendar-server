@@ -270,10 +270,10 @@ app.get("/api/assessments", async (req, res, next) => {
     const result = await db.query(
       `SELECT a.id, a.class_id, a.subject_id, a.title, a.details,
               to_char(a.due_date, 'YYYY-MM-DD') AS due_date,
-              a.created_by, u.display_name AS author, s.name AS subject_name,
+              a.created_by, COALESCE(u.display_name, '학생') AS author, s.name AS subject_name,
               c.school_id, c.grade, c.class_number, sc.name AS school_name, sc.region
        FROM assessments a
-       JOIN users u ON u.id = a.created_by
+       LEFT JOIN users u ON u.id = a.created_by
        JOIN subjects s ON s.id = a.subject_id
        JOIN classes c ON c.id = a.class_id
        JOIN schools sc ON sc.id = c.school_id
