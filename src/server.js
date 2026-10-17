@@ -581,7 +581,7 @@ app.put("/api/assessments/:id", async (req, res, next) => {
         return res.status(403).json({ error: "관리자는 본인 학교의 일정만 수정할 수 있어요." });
       }
       await db.query(
-        "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,due_time=$6,updated_at=NOW() WHERE id=$7",
+        "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,due_time=$6,start_date=$7,end_date=$8,start_time=$9,end_time=$10,updated_at=NOW() WHERE id=$11",
         [validated.payload.classId,validated.payload.subjectId,validated.payload.title,validated.payload.details,validated.payload.endDate,validated.payload.endTime,validated.payload.startDate,validated.payload.endDate,validated.payload.startTime,validated.payload.endTime,id]
       );
       return res.json({ message: "관리자 일정이 수정되어 바로 반영됐어요." });
