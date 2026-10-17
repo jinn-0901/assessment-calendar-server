@@ -525,8 +525,10 @@ async function validateAssessmentPayload(body) {
   const classId = positiveInt(body.classId);
   const subjectId = positiveInt(body.subjectId);
   const title = textValue(body.title, 180);
-  const dueDate = typeof body.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.dueDate) ? body.dueDate : null;
-  const dueTime = body.dueTime == null || body.dueTime === "" ? null : (typeof body.dueTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.dueTime) ? body.dueTime : undefined);
+  const startDate = typeof (body.startDate || body.dueDate) === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.startDate || body.dueDate) ? (body.startDate || body.dueDate) : null;
+  const endDate = typeof (body.endDate || body.dueDate) === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.endDate || body.dueDate) ? (body.endDate || body.dueDate) : null;
+  const startTime = body.startTime == null || body.startTime === "" ? null : (typeof body.startTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.startTime) ? body.startTime : undefined);
+  const endTime = body.endTime == null || body.endTime === "" ? (body.dueTime == null || body.dueTime === "" ? null : (typeof body.dueTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.dueTime) ? body.dueTime : undefined)) : (typeof body.endTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.endTime) ? body.endTime : undefined);
   const details = typeof body.details === "string" ? body.details.trim().slice(0, 3000) : "";
   if (!classId || !subjectId || !title || !startDate || !endDate || endDate < startDate || startTime === undefined || endTime === undefined) return { error: "학급, 과목, 제목, 시작·종료 날짜와 시간을 확인해 주세요." };
   if (startDate === endDate && startTime && endTime && endTime < startTime) return { error: "종료 시간은 시작 시간보다 빠를 수 없습니다." };
