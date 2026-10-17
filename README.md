@@ -58,3 +58,14 @@ curl -X POST "$API_URL/api/admin/setup" \
 - `GET /api/schools/:schoolId/classes`, `POST /api/classes`
 - `GET /api/schools/:schoolId/subjects`, `POST /api/subjects`
 - `GET /api/assessments`, `POST /api/assessments`, `PUT /api/assessments/:id`, `DELETE /api/assessments/:id`
+
+
+## NEIS school search
+
+The school setup form searches the NEIS Education Information Open API through the backend so the API key is not exposed in the browser.
+
+Set the following environment variable on the backend hosting service:
+
+- `NEIS_API_KEY`: API key issued by the [NEIS Education Information Open Portal](https://open.neis.go.kr/portal/guide/apiGuidePage.do).
+
+The server automatically adds the NEIS code columns to the `schools` table at startup. The same columns and index are also included in `schema.sql` for fresh database setup.
