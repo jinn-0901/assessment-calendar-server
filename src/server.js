@@ -172,7 +172,7 @@ app.post("/api/admin/register", async (req, res, next) => {
     if (!codeResult.rowCount) { await client.query("ROLLBACK"); return res.status(403).json({ error: "등록 코드가 올바르지 않거나 만료·사용된 코드입니다." }); }
     const passwordHash = await bcrypt.hash(password, 12);
     await client.query("INSERT INTO school_admins (school_id,password_hash) VALUES ($1,$2) ON CONFLICT (school_id) DO UPDATE SET password_hash=EXCLUDED.password_hash", [schoolId, passwordHash]);
-    await client.query("UPDATE school_admin_registration_codes SET used_at=NOW() WHERE id=$1", [codeResult.rows[0].id]);
+    await client.query("DELETE FROM school_admin_registration_codes WHERE id=$1", [codeResult.rows[0].id]);
     await client.query("COMMIT");
     res.status(201).json({ ok: true, message: "학교 관리자 등록이 완료됐습니다." });
   } catch (error) {
@@ -188,8 +188,9 @@ app.post("/api/admin/registration-codes", requireAdmin, async (req, res, next) =
   try {
     const schoolId = Number((req.admin || req.session.admin).schoolId);
     await client.query("BEGIN");
+    await client.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
     await client.query(
-      "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE school_id=$1 AND used_at IS NULL AND revoked_at IS NULL",
+      "DELETE FROM school_admin_registration_codes WHERE school_id=$1 AND used_at IS NULL AND revoked_at IS NULL",
       [schoolId]
     );
     const code = makeRegistrationCode();
@@ -321,10 +322,7 @@ app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next
         );
       }
     }
-    await client.query(
-      "UPDATE assessment_requests SET status=$1, reviewed_at=NOW(), reviewed_by_school_admin=$2 WHERE id=$3",
-      [decision === "approve" ? "approved" : "rejected", (req.admin || req.session.admin).schoolId, id]
-    );
+    await client.query("DELETE FROM assessment_requests WHERE id=$1", [id]);
     await client.query("COMMIT");
     res.json({ ok: true });
   } catch (error) {
@@ -606,6 +604,8 @@ app.use((error, req, res, next) => {
 async function startServer() {
   try {
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS created_by_admin BOOLEAN NOT NULL DEFAULT FALSE");
+    await db.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
+    await db.query("DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10)");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_school_code VARCHAR(20)");
     await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_schools_neis_codes ON schools(neis_office_code, neis_school_code) WHERE neis_office_code IS NOT NULL AND neis_school_code IS NOT NULL");
