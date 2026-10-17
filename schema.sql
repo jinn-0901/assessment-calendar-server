@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS schools (
   id BIGSERIAL PRIMARY KEY,
   name VARCHAR(160) NOT NULL,
   region VARCHAR(120) NOT NULL DEFAULT '',
+  neis_office_code VARCHAR(10),
+  neis_school_code VARCHAR(20),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (name, region)
 );
@@ -98,3 +100,11 @@ CREATE TABLE IF NOT EXISTS assessment_requests (
   reviewed_by_school_admin BIGINT REFERENCES schools(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_assessment_requests_school_status ON assessment_requests(school_id,status,created_at);
+
+
+-- NEIS school codes: also supports databases created before these columns existed.
+ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10);
+ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_school_code VARCHAR(20);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_schools_neis_codes
+  ON schools(neis_office_code, neis_school_code)
+  WHERE neis_office_code IS NOT NULL AND neis_school_code IS NOT NULL;
