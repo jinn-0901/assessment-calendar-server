@@ -465,7 +465,6 @@ app.get("/api/neis/timetable", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120,
     const date = validNeisDate(req.query.date);
     if (!schoolId || !/^\\d{1,2}$/.test(grade) || !className || className.length > 10 || !date) return res.status(400).json({ error: "학교, 학년, 반, 날짜를 확인해 주세요." });
     const school = await getNeisSchool(schoolId);
-    const endpoint = grade && (await db.query("SELECT name FROM schools WHERE id=$1", [schoolId])).rows[0]?.name ? null : null;
     const typeResult = await db.query("SELECT name FROM schools WHERE id=$1", [schoolId]);
     const schoolName = typeResult.rows[0]?.name || "";
     const schoolKind = /중학교/.test(schoolName) ? "misTimetable" : "hisTimetable";
