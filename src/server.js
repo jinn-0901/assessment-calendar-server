@@ -17,13 +17,13 @@ if (isProduction) app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "")
   .split(",")
-  .map((origin) => origin.trim().replace(/\\/$/, ""))
+  .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
 // CORS must allow the exact frontend origin because session cookies are used.
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin.replace(/\\/$/, ""))) {
+  if (origin && allowedOrigins.includes(origin.replace(/\/$/, ""))) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Access-Control-Allow-Credentials", "true");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
