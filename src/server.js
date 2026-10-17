@@ -490,7 +490,7 @@ app.get("/api/neis/meals", rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, stan
     if (!schoolId || !from || !to || from > to) return res.status(400).json({ error: "학교와 조회 기간을 확인해 주세요." });
     const school = await getNeisSchool(schoolId);
     const rows = await fetchNeisRows("mealServiceDietInfo", { ...school, MLSV_FROM_YMD: from, MLSV_TO_YMD: to });
-    res.json({ meals: rows.map(row => ({ date: String(row.MLSV_YMD || ""), mealType: String(row.MMEAL_SC_NM || ""), menu: String(row.DDISH_NM || "").replace(/<br\\s*\\/?\\s*>/gi, "\\n").replace(/\\([^)]*\\)/g, "").trim(), calories: String(row.CAL_INFO || "").trim() })).filter(row => /^\\d{8}$/.test(row.date)) });
+    res.json({ meals: rows.map(row => ({ date: String(row.MLSV_YMD || ""), mealType: String(row.MMEAL_SC_NM || ""), menu: String(row.DDISH_NM || "").replace(/<br\s*\/?\s*>/gi, "\n").replace(/\([^)]*\)/g, "").trim(), calories: String(row.CAL_INFO || "").trim() })).filter(row => /^\d{8}$/.test(row.date)) });
   } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 급식 정보를 불러오지 못했어요." }); }
 });
 
