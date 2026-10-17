@@ -453,7 +453,7 @@ app.get("/api/neis/academic-calendar", rateLimit({ windowMs: 15 * 60 * 1000, lim
     if (!schoolId || !from || !to || from > to) return res.status(400).json({ error: "학교와 조회 기간을 확인해 주세요." });
     const school = await getNeisSchool(schoolId);
     const rows = await fetchNeisRows("SchoolSchedule", { ...school, AA_FROM_YMD: from, AA_TO_YMD: to });
-    res.json({ events: rows.map(row => ({ date: String(row.AA_YMD || ""), name: String(row.EVENT_NM || "학사일정"), details: String(row.EVENT_CNTNT || ""), grade1: String(row.ONE_GRADE_EVENT_YN ?? "").trim().toUpperCase() === "Y", grade2: String(row.TWO_GRADE_EVENT_YN ?? "").trim().toUpperCase() === "Y", grade3: String(row.THREE_GRADE_EVENT_YN ?? "").trim().toUpperCase() === "Y" })).filter(row => /^\d{8}$/.test(row.date)) });
+    res.json({ events: rows.map(row => ({ date: String(row.AA_YMD || ""), name: String(row.EVENT_NM || "학사일정"), details: String(row.EVENT_CNTNT || ""), grade1: String(row.ONE_GRADE_EVENT_YN ?? "").trim().toUpperCase() === "Y", grade2: String(row.TW_GRADE_EVENT_YN ?? "").trim().toUpperCase() === "Y", grade3: String(row.THREE_GRADE_EVENT_YN ?? "").trim().toUpperCase() === "Y" })).filter(row => /^\d{8}$/.test(row.date)) });
   } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 학사일정을 불러오지 못했어요." }); }
 });
 
