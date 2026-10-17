@@ -1,4 +1,4 @@
--- Run this file against the Render PostgreSQL database.
+-- Run this file once against a new PostgreSQL database.
 -- PostgreSQL creates tables in dependency order.
 
 CREATE TABLE IF NOT EXISTS schools (
