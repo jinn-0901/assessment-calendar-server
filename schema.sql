@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS assessments (
   title VARCHAR(180) NOT NULL,
   details TEXT NOT NULL DEFAULT '',
   due_date DATE NOT NULL,
-  created_by BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_by BIGINT REFERENCES users(id) ON DELETE RESTRICT,
+  status VARCHAR(20) NOT NULL DEFAULT 'approved' CHECK (status IN ('approved')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -75,3 +76,25 @@ DROP TRIGGER IF EXISTS trg_validate_assessment_school ON assessments;
 CREATE TRIGGER trg_validate_assessment_school
 BEFORE INSERT OR UPDATE ON assessments
 FOR EACH ROW EXECUTE FUNCTION validate_assessment_school();
+
+
+-- School-scoped administrator credentials. Students do not need accounts.
+CREATE TABLE IF NOT EXISTS school_admins (
+  school_id BIGINT PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- New schedules and edits are invisible until a school admin approves them.
+CREATE TABLE IF NOT EXISTS assessment_requests (
+  id BIGSERIAL PRIMARY KEY,
+  school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  assessment_id BIGINT REFERENCES assessments(id) ON DELETE CASCADE,
+  action VARCHAR(20) NOT NULL CHECK (action IN ('create','edit')),
+  payload JSONB NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at TIMESTAMPTZ,
+  reviewed_by_school_admin BIGINT REFERENCES schools(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assessment_requests_school_status ON assessment_requests(school_id,status,created_at);
