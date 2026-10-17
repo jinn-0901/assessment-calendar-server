@@ -311,7 +311,7 @@ app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next
       const p = row.payload;
       if (row.action === "create") {
         await client.query(
-          "INSERT INTO assessments (class_id,subject_id,title,details,due_date,created_by) VALUES ($1,$2,$3,$4,$5,NULL)",
+          "INSERT INTO assessments (class_id,subject_id,title,details,due_date,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,NULL,FALSE)",
           [p.classId,p.subjectId,p.title,p.details,p.dueDate]
         );
       } else if (row.action === "edit") {
@@ -503,7 +503,7 @@ app.get("/api/assessments", async (req, res, next) => {
     const result = await db.query(
       `SELECT a.id, a.class_id, a.subject_id, a.title, a.details,
               to_char(a.due_date, 'YYYY-MM-DD') AS due_date,
-              a.created_by, CASE WHEN a.created_by IS NULL THEN '학교 관리자' ELSE COALESCE(u.display_name, '학생') END AS author, s.name AS subject_name,
+              a.created_by, CASE WHEN a.created_by_admin THEN '학교 관리자' ELSE COALESCE(u.display_name, '학생') END AS author, s.name AS subject_name,
               c.school_id, c.grade, c.class_number, sc.name AS school_name, sc.region
        FROM assessments a
        LEFT JOIN users u ON u.id = a.created_by
@@ -543,7 +543,7 @@ app.post("/api/assessments", async (req, res, next) => {
     if (admin) {
       if (String(admin.schoolId) !== String(validated.schoolId)) return res.status(403).json({ error: "관리자는 본인 학교의 일정만 등록할 수 있어요." });
       const result = await db.query(
-        "INSERT INTO assessments (class_id,subject_id,title,details,due_date,created_by) VALUES ($1,$2,$3,$4,$5,NULL) RETURNING id",
+        "INSERT INTO assessments (class_id,subject_id,title,details,due_date,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,NULL,TRUE) RETURNING id",
         [validated.payload.classId, validated.payload.subjectId, validated.payload.title, validated.payload.details, validated.payload.dueDate]
       );
       return res.status(201).json({ assessmentId: result.rows[0].id, message: "관리자 일정이 등록되어 바로 공개됐어요." });
@@ -605,6 +605,7 @@ app.use((error, req, res, next) => {
 
 async function startServer() {
   try {
+    await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS created_by_admin BOOLEAN NOT NULL DEFAULT FALSE");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10)");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_school_code VARCHAR(20)");
     await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_schools_neis_codes ON schools(neis_office_code, neis_school_code) WHERE neis_office_code IS NOT NULL AND neis_school_code IS NOT NULL");
