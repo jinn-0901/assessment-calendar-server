@@ -111,8 +111,6 @@ app.post("/api/admin/registration-codes/bootstrap", async (req, res, next) => {
     await client.query("BEGIN");
     const school = await client.query("SELECT id FROM schools WHERE id=$1 FOR UPDATE", [schoolId]);
     if (!school.rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "학교를 찾을 수 없습니다." }); }
-    const existingAdmin = await client.query("SELECT school_id FROM school_admins WHERE school_id=$1", [schoolId]);
-    if (existingAdmin.rowCount) { await client.query("ROLLBACK"); return res.status(409).json({ error: "이 학교에는 이미 관리자가 등록되어 있습니다. 비밀번호 재설정 절차를 이용해 주세요." }); }
     const code = makeRegistrationCode();
     await client.query(
       "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE school_id=$1 AND used_at IS NULL AND revoked_at IS NULL",
