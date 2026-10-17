@@ -59,9 +59,33 @@ app.use(session({
 
 app.use("/api/admin", rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false }));
 
+function signAdminToken(admin) {
+  const payload = Buffer.from(JSON.stringify({ ...admin, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 })).toString("base64url");
+  const signature = crypto.createHmac("sha256", process.env.SESSION_SECRET || "local-development-only-change-this-secret").update(payload).digest("base64url");
+  return payload + "." + signature;
+}
+
+function readAdminToken(req) {
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) return null;
+  const parts = header.slice(7).split(".");
+  if (parts.length !== 2) return null;
+  const expected = crypto.createHmac("sha256", process.env.SESSION_SECRET || "local-development-only-change-this-secret").update(parts[0]).digest();
+  let actual;
+  try { actual = Buffer.from(parts[1], "base64url"); } catch { return null; }
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    if (!payload.schoolId || !payload.schoolName || !Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+    return { schoolId: String(payload.schoolId), schoolName: payload.schoolName };
+  } catch { return null; }
+}
+
 function requireAdmin(req, res, next) {
-  if (!req.session.admin) return res.status(401).json({ error: "학교 관리자 인증이 필요합니다." });
-  next();
+  const admin = readAdminToken(req);
+  if (admin) { req.admin = admin; return next(); }
+  if (req.session?.admin) { req.admin = req.session.admin; return next(); }
+  return res.status(401).json({ error: "관리자 인증이 만료되었어요. 다시 로그인해 주세요." });
 }
 
 function positiveInt(value) {
@@ -162,7 +186,7 @@ app.post("/api/admin/register", async (req, res, next) => {
 app.post("/api/admin/registration-codes", requireAdmin, async (req, res, next) => {
   const client = await db.pool.connect();
   try {
-    const schoolId = Number(req.session.admin.schoolId);
+    const schoolId = Number((req.admin || req.session.admin).schoolId);
     await client.query("BEGIN");
     await client.query(
       "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE school_id=$1 AND used_at IS NULL AND revoked_at IS NULL",
@@ -221,7 +245,7 @@ app.post("/api/admin/login", async (req, res, next) => {
       req.session.admin = { schoolId: String(admin.school_id), schoolName: admin.school_name };
       req.session.save((saveError) => {
         if (saveError) return next(saveError);
-        res.json({ admin: req.session.admin });
+        res.json({ admin: req.session.admin, token: signAdminToken(req.session.admin) });
       });
     });
   } catch (error) { next(error); }
