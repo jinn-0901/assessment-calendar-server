@@ -312,13 +312,13 @@ app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next
       const p = row.payload;
       if (row.action === "create") {
         await client.query(
-          "INSERT INTO assessments (class_id,subject_id,title,details,due_date,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,NULL,FALSE)",
-          [p.classId,p.subjectId,p.title,p.details,p.dueDate]
+          "INSERT INTO assessments (class_id,subject_id,title,details,due_date,due_time,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,$6,NULL,FALSE)",
+          [p.classId,p.subjectId,p.title,p.details,p.dueDate,p.dueTime || null]
         );
       } else if (row.action === "edit") {
         await client.query(
-          "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,updated_at=NOW() WHERE id=$6",
-          [p.classId,p.subjectId,p.title,p.details,p.dueDate,row.assessment_id]
+          "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,due_time=$6,updated_at=NOW() WHERE id=$7",
+          [p.classId,p.subjectId,p.title,p.details,p.dueDate,p.dueTime || null,row.assessment_id]
         );
       }
     }
@@ -501,6 +501,7 @@ app.get("/api/assessments", async (req, res, next) => {
     const result = await db.query(
       `SELECT a.id, a.class_id, a.subject_id, a.title, a.details,
               to_char(a.due_date, 'YYYY-MM-DD') AS due_date,
+              to_char(a.due_time, 'HH24:MI') AS due_time,
               a.created_by, CASE WHEN a.created_by_admin THEN '학교 관리자' ELSE COALESCE(u.display_name, '학생') END AS author, s.name AS subject_name,
               c.school_id, c.grade, c.class_number, sc.name AS school_name, sc.region
        FROM assessments a
@@ -521,8 +522,9 @@ async function validateAssessmentPayload(body) {
   const subjectId = positiveInt(body.subjectId);
   const title = textValue(body.title, 180);
   const dueDate = typeof body.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.dueDate) ? body.dueDate : null;
+  const dueTime = body.dueTime == null || body.dueTime === "" ? null : (typeof body.dueTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.dueTime) ? body.dueTime : undefined);
   const details = typeof body.details === "string" ? body.details.trim().slice(0, 3000) : "";
-  if (!classId || !subjectId || !title || !dueDate) return { error: "학급, 과목, 제목, 날짜를 모두 입력해 주세요." };
+  if (!classId || !subjectId || !title || !dueDate || dueTime === undefined) return { error: "학급, 과목, 제목, 날짜와 시간을 확인해 주세요." };
   const context = await db.query(
     "SELECT c.school_id,s.school_id AS subject_school_id FROM classes c CROSS JOIN subjects s WHERE c.id=$1 AND s.id=$2",
     [classId, subjectId]
@@ -530,7 +532,7 @@ async function validateAssessmentPayload(body) {
   if (!context.rowCount || String(context.rows[0].school_id) !== String(context.rows[0].subject_school_id)) {
     return { error: "학급과 과목은 같은 학교에 속해야 합니다." };
   }
-  return { payload: { classId, subjectId, title, details, dueDate }, schoolId: context.rows[0].school_id };
+  return { payload: { classId, subjectId, title, details, dueDate, dueTime }, schoolId: context.rows[0].school_id };
 }
 
 app.post("/api/assessments", async (req, res, next) => {
@@ -541,8 +543,8 @@ app.post("/api/assessments", async (req, res, next) => {
     if (admin) {
       if (String(admin.schoolId) !== String(validated.schoolId)) return res.status(403).json({ error: "관리자는 본인 학교의 일정만 등록할 수 있어요." });
       const result = await db.query(
-        "INSERT INTO assessments (class_id,subject_id,title,details,due_date,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,NULL,TRUE) RETURNING id",
-        [validated.payload.classId, validated.payload.subjectId, validated.payload.title, validated.payload.details, validated.payload.dueDate]
+        "INSERT INTO assessments (class_id,subject_id,title,details,due_date,due_time,created_by,created_by_admin) VALUES ($1,$2,$3,$4,$5,$6,NULL,TRUE) RETURNING id",
+        [validated.payload.classId, validated.payload.subjectId, validated.payload.title, validated.payload.details, validated.payload.dueDate, validated.payload.dueTime]
       );
       return res.status(201).json({ assessmentId: result.rows[0].id, message: "관리자 일정이 등록되어 바로 공개됐어요." });
     }
@@ -574,8 +576,8 @@ app.put("/api/assessments/:id", async (req, res, next) => {
         return res.status(403).json({ error: "관리자는 본인 학교의 일정만 수정할 수 있어요." });
       }
       await db.query(
-        "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,updated_at=NOW() WHERE id=$6",
-        [validated.payload.classId,validated.payload.subjectId,validated.payload.title,validated.payload.details,validated.payload.dueDate,id]
+        "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,due_time=$6,updated_at=NOW() WHERE id=$7",
+        [validated.payload.classId,validated.payload.subjectId,validated.payload.title,validated.payload.details,validated.payload.dueDate,validated.payload.dueTime,id]
       );
       return res.json({ message: "관리자 일정이 수정되어 바로 반영됐어요." });
     }
@@ -587,8 +589,17 @@ app.put("/api/assessments/:id", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.delete("/api/assessments/:id", (req, res) => {
-  res.status(403).json({ error: "일정 삭제는 관리자에게 요청해 주세요." });
+app.delete("/api/assessments/:id", requireAdmin, async (req, res, next) => {
+  try {
+    const id = positiveInt(req.params.id);
+    if (!id) return res.status(400).json({ error: "일정 ID가 올바르지 않습니다." });
+    const result = await db.query(
+      "DELETE FROM assessments a USING classes c WHERE a.id=$1 AND a.class_id=c.id AND c.school_id=$2 RETURNING a.id",
+      [id, (req.admin || req.session.admin).schoolId]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "삭제할 일정을 찾을 수 없거나 본인 학교의 일정이 아닙니다." });
+    res.json({ ok: true, message: "일정이 삭제됐어요." });
+  } catch (error) { next(error); }
 });
 
 app.use("/api", (req, res) => {
@@ -604,6 +615,7 @@ app.use((error, req, res, next) => {
 async function startServer() {
   try {
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS created_by_admin BOOLEAN NOT NULL DEFAULT FALSE");
+    await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS due_time TIME");
     await db.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
     await db.query("DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10)");
