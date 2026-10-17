@@ -417,7 +417,7 @@ app.get("/api/neis/classes", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120, s
 });
 
 
-function validNeisDate(value) { return typeof value === "string" && /^\\d{4}-\\d{2}-\\d{2}$/.test(value) ? value.replace(/-/g, "") : null; }
+function validNeisDate(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value.replace(/-/g, "") : null; }
 
 async function fetchNeisRows(endpoint, params) {
   const key = process.env.NEIS_API_KEY;
@@ -453,7 +453,7 @@ app.get("/api/neis/academic-calendar", rateLimit({ windowMs: 15 * 60 * 1000, lim
     if (!schoolId || !from || !to || from > to) return res.status(400).json({ error: "학교와 조회 기간을 확인해 주세요." });
     const school = await getNeisSchool(schoolId);
     const rows = await fetchNeisRows("SchoolSchedule", { ...school, AA_FROM_YMD: from, AA_TO_YMD: to });
-    res.json({ events: rows.map(row => ({ date: String(row.AA_YMD || ""), name: String(row.EVENT_NM || "학사일정"), details: String(row.EVENT_CNTNT || ""), grade1: row.ONE_GRADE_EVENT_YN === "Y", grade2: row.TWO_GRADE_EVENT_YN === "Y", grade3: row.THREE_GRADE_EVENT_YN === "Y" })).filter(row => /^\\d{8}$/.test(row.date)) });
+    res.json({ events: rows.map(row => ({ date: String(row.AA_YMD || ""), name: String(row.EVENT_NM || "학사일정"), details: String(row.EVENT_CNTNT || ""), grade1: row.ONE_GRADE_EVENT_YN === "Y", grade2: row.TWO_GRADE_EVENT_YN === "Y", grade3: row.THREE_GRADE_EVENT_YN === "Y" })).filter(row => /^\d{8}$/.test(row.date)) });
   } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 학사일정을 불러오지 못했어요." }); }
 });
 
@@ -463,7 +463,7 @@ app.get("/api/neis/timetable", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120,
     const grade = typeof req.query.grade === "string" ? req.query.grade.trim() : "";
     const className = typeof req.query.className === "string" ? req.query.className.trim() : "";
     const date = validNeisDate(req.query.date);
-    if (!schoolId || !/^\\d{1,2}$/.test(grade) || !className || className.length > 10 || !date) return res.status(400).json({ error: "학교, 학년, 반, 날짜를 확인해 주세요." });
+    if (!schoolId || !/^\d{1,2}$/.test(grade) || !className || className.length > 10 || !date) return res.status(400).json({ error: "학교, 학년, 반, 날짜를 확인해 주세요." });
     const school = await getNeisSchool(schoolId);
     const typeResult = await db.query("SELECT name FROM schools WHERE id=$1", [schoolId]);
     const schoolName = typeResult.rows[0]?.name || "";
