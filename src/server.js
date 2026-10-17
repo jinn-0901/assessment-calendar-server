@@ -243,7 +243,7 @@ app.get("/api/neis/classes", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120, s
   const schoolId = positiveInt(req.query.schoolId);
   const grade = typeof req.query.grade === "string" ? req.query.grade.trim() : "";
   if (!schoolId) return res.status(400).json({ error: "학교 선택이 올바르지 않습니다." });
-  if (grade && !/^\\d{1,2}$/.test(grade)) return res.status(400).json({ error: "학년 값이 올바르지 않습니다." });
+  if (grade && !/^\d{1,2}$/.test(grade)) return res.status(400).json({ error: "학년 값이 올바르지 않습니다." });
   const key = process.env.NEIS_API_KEY;
   if (!key) return res.status(503).json({ error: "나이스 학급 조회 API가 설정되지 않았어요." });
   try {
