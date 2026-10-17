@@ -11,7 +11,7 @@ const isProduction = process.env.NODE_ENV === "production";
 const port = process.env.PORT || 3000;
 
 if (isProduction && !process.env.SESSION_SECRET) {
-  throw new Error("SESSION_SECRET must be set in the Render environment.");
+  throw new Error("SESSION_SECRET must be set in the server environment.");
 }
 if (isProduction) app.set("trust proxy", 1);
 
