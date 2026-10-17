@@ -227,6 +227,26 @@ app.post("/api/admin/login", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.post("/api/admin/password", requireAdmin, async (req, res, next) => {
+  try {
+    const currentPassword = typeof req.body.currentPassword === "string" ? req.body.currentPassword : "";
+    const newPassword = typeof req.body.newPassword === "string" ? req.body.newPassword : "";
+    if (newPassword.length < 12 || newPassword.length > 128) {
+      return res.status(400).json({ error: "새 비밀번호는 12~128자로 설정해 주세요." });
+    }
+    const result = await db.query(
+      "SELECT password_hash FROM school_admins WHERE school_id=$1",
+      [req.session.admin.schoolId]
+    );
+    if (!result.rowCount || !(await bcrypt.compare(currentPassword, result.rows[0].password_hash))) {
+      return res.status(403).json({ error: "현재 비밀번호가 올바르지 않습니다." });
+    }
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+    await db.query("UPDATE school_admins SET password_hash=$1 WHERE school_id=$2", [passwordHash, req.session.admin.schoolId]);
+    res.json({ ok: true, message: "관리자 비밀번호가 변경되었습니다." });
+  } catch (error) { next(error); }
+});
+
 app.post("/api/admin/logout", requireAdmin, (req, res, next) => {
   req.session.destroy((error) => {
     if (error) return next(error);
