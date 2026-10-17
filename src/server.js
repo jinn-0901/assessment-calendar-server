@@ -462,15 +462,36 @@ app.get("/api/neis/timetable", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120,
     const schoolId = positiveInt(req.query.schoolId);
     const grade = typeof req.query.grade === "string" ? req.query.grade.trim() : "";
     const className = typeof req.query.className === "string" ? req.query.className.trim() : "";
-    const date = validNeisDate(req.query.date);
-    if (!schoolId || !/^\d{1,2}$/.test(grade) || !className || className.length > 10 || !date) return res.status(400).json({ error: "학교, 학년, 반, 날짜를 확인해 주세요." });
+    const from = validNeisDate(req.query.from || req.query.date);
+    if (!schoolId || !/^\\d{1,2}$/.test(grade) || !className || className.length > 10 || !from) return res.status(400).json({ error: "학교, 학년, 반, 시작 날짜를 확인해 주세요." });
     const school = await getNeisSchool(schoolId);
-    const typeResult = await db.query("SELECT name FROM schools WHERE id=$1", [schoolId]);
-    const schoolName = typeResult.rows[0]?.name || "";
-    const schoolKind = /중학교/.test(schoolName) ? "misTimetable" : "hisTimetable";
-    const rows = await fetchNeisRows(schoolKind, { ...school, ALL_TI_YMD: date, GRADE: grade, CLASS_NM: className });
-    res.json({ timetable: rows.map(row => ({ period: Number(row.PERIO), subject: String(row.ITRT_CNTNT || "").trim(), classroom: String(row.CLRM_NM || "").trim() })).filter(row => Number.isInteger(row.period) && row.period > 0).sort((a,b) => a.period-b.period) });
-  } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 시간표를 불러오지 못했어요." }); }
+    const schoolResult = await db.query("SELECT name FROM schools WHERE id=$1", [schoolId]);
+    const schoolName = schoolResult.rows[0]?.name || "";
+    const schoolKind = /초등학교/.test(schoolName) ? "elsTimetable" : /중학교/.test(schoolName) ? "misTimetable" : "hisTimetable";
+    const startDate = new Date(Number(from.slice(0,4)), Number(from.slice(4,6))-1, Number(from.slice(6,8)));
+    const dates = Array.from({length:5}, (_, i) => {
+      const d = new Date(startDate); d.setDate(startDate.getDate()+i);
+      return String(d.getFullYear()) + String(d.getMonth()+1).padStart(2,"0") + String(d.getDate()).padStart(2,"0");
+    });
+    const timetable = [];
+    for (const date of dates) {
+      const rows = await fetchNeisRows(schoolKind, { ...school, ALL_TI_YMD: date, GRADE: grade, CLASS_NM: className });
+      timetable.push({ date, lessons: rows.map(row => ({ period: Number(row.PERIO), subject: String(row.ITRT_CNTNT || "").trim(), classroom: String(row.CLRM_NM || "").trim() })).filter(row => Number.isInteger(row.period) && row.period > 0).sort((a,b) => a.period-b.period) });
+    }
+    res.json({ timetable });
+  } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 주간 시간표를 불러오지 못했어요." }); }
+});
+
+app.get("/api/neis/meals", rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: false, legacyHeaders: false }), async (req, res) => {
+  try {
+    const schoolId = positiveInt(req.query.schoolId);
+    const from = validNeisDate(req.query.from);
+    const to = validNeisDate(req.query.to);
+    if (!schoolId || !from || !to || from > to) return res.status(400).json({ error: "학교와 조회 기간을 확인해 주세요." });
+    const school = await getNeisSchool(schoolId);
+    const rows = await fetchNeisRows("mealServiceDietInfo", { ...school, MLSV_FROM_YMD: from, MLSV_TO_YMD: to });
+    res.json({ meals: rows.map(row => ({ date: String(row.MLSV_YMD || ""), mealType: String(row.MMEAL_SC_NM || ""), menu: String(row.DDISH_NM || "").replace(/<br\\s*\\/?\\s*>/gi, "\\n").replace(/\\([^)]*\\)/g, "").trim(), calories: String(row.CAL_INFO || "").trim() })).filter(row => /^\\d{8}$/.test(row.date)) });
+  } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 급식 정보를 불러오지 못했어요." }); }
 });
 
 app.get("/api/schools", async (req, res, next) => {
