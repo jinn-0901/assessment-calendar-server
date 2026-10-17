@@ -282,8 +282,11 @@ app.post("/api/admin/logout", requireAdmin, (req, res, next) => {
 app.get("/api/admin/requests", requireAdmin, async (req, res, next) => {
   try {
     const result = await db.query(
-      `SELECT r.id,r.school_id,r.assessment_id,r.action,r.payload,r.created_at,s.name AS school_name
+      `SELECT r.id,r.school_id,r.assessment_id,r.action,r.payload,r.created_at,s.name AS school_name,
+              sub.name AS subject_name,c.grade,c.class_number
        FROM assessment_requests r JOIN schools s ON s.id=r.school_id
+       LEFT JOIN subjects sub ON sub.id = NULLIF(r.payload->>'subjectId','')::BIGINT
+       LEFT JOIN classes c ON c.id = NULLIF(r.payload->>'classId','')::BIGINT
        WHERE r.school_id=$1 AND r.status='pending' ORDER BY r.created_at ASC`,
       [(req.admin || req.session.admin).schoolId]
     );
@@ -500,7 +503,7 @@ app.get("/api/assessments", async (req, res, next) => {
     const result = await db.query(
       `SELECT a.id, a.class_id, a.subject_id, a.title, a.details,
               to_char(a.due_date, 'YYYY-MM-DD') AS due_date,
-              a.created_by, COALESCE(u.display_name, '학생') AS author, s.name AS subject_name,
+              a.created_by, CASE WHEN a.created_by IS NULL THEN '학교 관리자' ELSE COALESCE(u.display_name, '학생') END AS author, s.name AS subject_name,
               c.school_id, c.grade, c.class_number, sc.name AS school_name, sc.region
        FROM assessments a
        LEFT JOIN users u ON u.id = a.created_by
@@ -536,6 +539,15 @@ app.post("/api/assessments", async (req, res, next) => {
   try {
     const validated = await validateAssessmentPayload(req.body);
     if (validated.error) return res.status(400).json({ error: validated.error });
+    const admin = readAdminToken(req) || req.session?.admin || null;
+    if (admin) {
+      if (String(admin.schoolId) !== String(validated.schoolId)) return res.status(403).json({ error: "관리자는 본인 학교의 일정만 등록할 수 있어요." });
+      const result = await db.query(
+        "INSERT INTO assessments (class_id,subject_id,title,details,due_date,created_by) VALUES ($1,$2,$3,$4,$5,NULL) RETURNING id",
+        [validated.payload.classId, validated.payload.subjectId, validated.payload.title, validated.payload.details, validated.payload.dueDate]
+      );
+      return res.status(201).json({ assessmentId: result.rows[0].id, message: "관리자 일정이 등록되어 바로 공개됐어요." });
+    }
     await db.query(
       "INSERT INTO assessment_requests (school_id,action,payload) VALUES ($1,'create',$2::jsonb)",
       [validated.schoolId, JSON.stringify(validated.payload)]
@@ -557,6 +569,17 @@ app.put("/api/assessments/:id", async (req, res, next) => {
     if (validated.error) return res.status(400).json({ error: validated.error });
     if (String(current.rows[0].school_id) !== String(validated.schoolId)) {
       return res.status(400).json({ error: "일정은 원래 학교 안에서만 수정 신청할 수 있습니다." });
+    }
+    const admin = readAdminToken(req) || req.session?.admin || null;
+    if (admin) {
+      if (String(admin.schoolId) !== String(current.rows[0].school_id) || String(admin.schoolId) !== String(validated.schoolId)) {
+        return res.status(403).json({ error: "관리자는 본인 학교의 일정만 수정할 수 있어요." });
+      }
+      await db.query(
+        "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,updated_at=NOW() WHERE id=$6",
+        [validated.payload.classId,validated.payload.subjectId,validated.payload.title,validated.payload.details,validated.payload.dueDate,id]
+      );
+      return res.json({ message: "관리자 일정이 수정되어 바로 반영됐어요." });
     }
     await db.query(
       "INSERT INTO assessment_requests (school_id,assessment_id,action,payload) VALUES ($1,$2,'edit',$3::jsonb)",
