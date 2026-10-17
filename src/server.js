@@ -416,6 +416,64 @@ app.get("/api/neis/classes", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120, s
   }
 });
 
+
+function validNeisDate(value) { return typeof value === "string" && /^\\d{4}-\\d{2}-\\d{2}$/.test(value) ? value.replace(/-/g, "") : null; }
+
+async function fetchNeisRows(endpoint, params) {
+  const key = process.env.NEIS_API_KEY;
+  if (!key) { const error = new Error("나이스 API 인증키가 서버에 설정되지 않았어요."); error.status = 503; throw error; }
+  const query = new URLSearchParams({ KEY: key, Type: "json", pIndex: "1", pSize: "1000", ...params });
+  const response = await fetch("https://open.neis.go.kr/hub/" + endpoint + "?" + query.toString(), { signal: AbortSignal.timeout(10000) });
+  if (!response.ok) { const error = new Error("나이스 데이터를 불러오지 못했어요."); error.status = 502; throw error; }
+  const payload = await response.json();
+  const rows = payload?.[endpoint]?.[1]?.row || [];
+  const result = payload?.RESULT;
+  if (!rows.length && result?.CODE && result.CODE !== "INFO-200") {
+    if (result.CODE === "INFO-200") return [];
+    const error = new Error("나이스 조회 결과: " + (result.MESSAGE || result.CODE));
+    error.status = 502;
+    throw error;
+  }
+  return rows;
+}
+
+async function getNeisSchool(schoolId) {
+  const result = await db.query("SELECT neis_office_code, neis_school_code FROM schools WHERE id=$1", [schoolId]);
+  const school = result.rows[0];
+  if (!school) { const error = new Error("학교를 찾을 수 없습니다."); error.status = 404; throw error; }
+  if (!school.neis_office_code || !school.neis_school_code) { const error = new Error("학교의 나이스 코드가 없어요. 나이스 학교 검색으로 다시 등록해 주세요."); error.status = 400; throw error; }
+  return { ATPT_OFCDC_SC_CODE: school.neis_office_code, SD_SCHUL_CODE: school.neis_school_code };
+}
+
+app.get("/api/neis/academic-calendar", rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
+  try {
+    const schoolId = positiveInt(req.query.schoolId);
+    const from = validNeisDate(req.query.from);
+    const to = validNeisDate(req.query.to);
+    if (!schoolId || !from || !to || from > to) return res.status(400).json({ error: "학교와 조회 기간을 확인해 주세요." });
+    const school = await getNeisSchool(schoolId);
+    const rows = await fetchNeisRows("SchoolSchedule", { ...school, AA_FROM_YMD: from, AA_TO_YMD: to });
+    res.json({ events: rows.map(row => ({ date: String(row.AA_YMD || ""), name: String(row.EVENT_NM || "학사일정"), details: String(row.EVENT_CNTNT || ""), grade1: row.ONE_GRADE_EVENT_YN === "Y", grade2: row.TWO_GRADE_EVENT_YN === "Y", grade3: row.THREE_GRADE_EVENT_YN === "Y" })).filter(row => /^\\d{8}$/.test(row.date)) });
+  } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 학사일정을 불러오지 못했어요." }); }
+});
+
+app.get("/api/neis/timetable", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false }), async (req, res) => {
+  try {
+    const schoolId = positiveInt(req.query.schoolId);
+    const grade = typeof req.query.grade === "string" ? req.query.grade.trim() : "";
+    const className = typeof req.query.className === "string" ? req.query.className.trim() : "";
+    const date = validNeisDate(req.query.date);
+    if (!schoolId || !/^\\d{1,2}$/.test(grade) || !className || className.length > 10 || !date) return res.status(400).json({ error: "학교, 학년, 반, 날짜를 확인해 주세요." });
+    const school = await getNeisSchool(schoolId);
+    const endpoint = grade && (await db.query("SELECT name FROM schools WHERE id=$1", [schoolId])).rows[0]?.name ? null : null;
+    const typeResult = await db.query("SELECT name FROM schools WHERE id=$1", [schoolId]);
+    const schoolName = typeResult.rows[0]?.name || "";
+    const schoolKind = /중학교/.test(schoolName) ? "misTimetable" : "hisTimetable";
+    const rows = await fetchNeisRows(schoolKind, { ...school, ALL_TI_YMD: date, GRADE: grade, CLASS_NM: className });
+    res.json({ timetable: rows.map(row => ({ period: Number(row.PERIO), subject: String(row.ITRT_CNTNT || "").trim(), classroom: String(row.CLRM_NM || "").trim() })).filter(row => Number.isInteger(row.period) && row.period > 0).sort((a,b) => a.period-b.period) });
+  } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 시간표를 불러오지 못했어요." }); }
+});
+
 app.get("/api/schools", async (req, res, next) => {
   try {
     const result = await db.query("SELECT id, name, region FROM schools ORDER BY name, region");
