@@ -56,10 +56,10 @@ app.use(session({
   }
 }));
 
-app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false }));
+app.use("/api/admin", rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false }));
 
-function requireLogin(req, res, next) {
-  if (!req.session.user) return res.status(401).json({ error: "일정을 등록하거나 수정하려면 로그인해 주세요." });
+function requireAdmin(req, res, next) {
+  if (!req.session.admin) return res.status(401).json({ error: "학교 관리자 인증이 필요합니다." });
   next();
 }
 
@@ -84,60 +84,112 @@ app.get("/api/health", async (req, res) => {
 });
 
 app.get("/api/me", (req, res) => {
-  res.json({ user: req.session.user || null });
+  res.json({ admin: req.session.admin || null });
 });
 
-app.post("/api/auth/register", async (req, res, next) => {
+app.post("/api/admin/setup", async (req, res, next) => {
   try {
-    const email = textValue(req.body.email, 254)?.toLowerCase();
-    const displayName = textValue(req.body.displayName, 80);
+    const setupKey = typeof req.body.setupKey === "string" ? req.body.setupKey : "";
+    const schoolId = positiveInt(req.body.schoolId);
     const password = req.body.password;
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).json({ error: "올바른 이메일 주소를 입력해 주세요." });
+    if (!process.env.ADMIN_SETUP_KEY || setupKey !== process.env.ADMIN_SETUP_KEY) {
+      return res.status(403).json({ error: "관리자 초기 설정 키가 올바르지 않습니다." });
     }
-    if (!displayName) return res.status(400).json({ error: "표시 이름을 입력해 주세요." });
-    if (typeof password !== "string" || password.length < 8 || password.length > 128) {
-      return res.status(400).json({ error: "비밀번호는 8~128자로 설정해 주세요." });
+    if (!schoolId || typeof password !== "string" || password.length < 12 || password.length > 128) {
+      return res.status(400).json({ error: "학교와 12자 이상의 관리자 비밀번호를 입력해 주세요." });
     }
-    const passwordHash = await bcrypt.hash(password, 12);
-    const result = await db.query(
-      "INSERT INTO users (email, display_name, password_hash) VALUES ($1, $2, $3) RETURNING id, email, display_name",
-      [email, displayName, passwordHash]
+    const exists = await db.query("SELECT id FROM schools WHERE id=$1", [schoolId]);
+    if (!exists.rowCount) return res.status(404).json({ error: "학교를 찾을 수 없습니다." });
+    const hash = await bcrypt.hash(password, 12);
+    await db.query(
+      "INSERT INTO school_admins (school_id,password_hash) VALUES ($1,$2) ON CONFLICT (school_id) DO UPDATE SET password_hash=EXCLUDED.password_hash",
+      [schoolId, hash]
     );
-    req.session.user = { id: result.rows[0].id, email: result.rows[0].email, displayName: result.rows[0].display_name };
-    res.status(201).json({ user: req.session.user });
-  } catch (error) {
-    if (error.code === "23505") return res.status(409).json({ error: "이미 가입된 이메일입니다." });
-    next(error);
-  }
+    res.status(201).json({ ok: true });
+  } catch (error) { next(error); }
 });
 
-app.post("/api/auth/login", async (req, res, next) => {
+app.post("/api/admin/login", async (req, res, next) => {
   try {
-    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const schoolId = positiveInt(req.body.schoolId);
     const password = typeof req.body.password === "string" ? req.body.password : "";
-    const result = await db.query("SELECT id, email, display_name, password_hash FROM users WHERE email = $1", [email]);
-    const user = result.rows[0];
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      return res.status(401).json({ error: "이메일 또는 비밀번호를 확인해 주세요." });
+    const result = await db.query(
+      "SELECT a.school_id,a.password_hash,s.name AS school_name FROM school_admins a JOIN schools s ON s.id=a.school_id WHERE a.school_id=$1",
+      [schoolId]
+    );
+    const admin = result.rows[0];
+    if (!admin || !(await bcrypt.compare(password, admin.password_hash))) {
+      return res.status(401).json({ error: "학교 또는 관리자 비밀번호를 확인해 주세요." });
     }
     req.session.regenerate((error) => {
       if (error) return next(error);
-      req.session.user = { id: user.id, email: user.email, displayName: user.display_name };
+      req.session.admin = { schoolId: String(admin.school_id), schoolName: admin.school_name };
       req.session.save((saveError) => {
         if (saveError) return next(saveError);
-        res.json({ user: req.session.user });
+        res.json({ admin: req.session.admin });
       });
     });
   } catch (error) { next(error); }
 });
 
-app.post("/api/auth/logout", (req, res, next) => {
+app.post("/api/admin/logout", requireAdmin, (req, res, next) => {
   req.session.destroy((error) => {
     if (error) return next(error);
-    res.clearCookie("assessment.sid", { httpOnly: true, sameSite: "lax", secure: isProduction });
+    res.clearCookie("assessment.sid", { httpOnly: true, sameSite: isProduction ? "none" : "lax", secure: isProduction });
     res.json({ ok: true });
   });
+});
+
+app.get("/api/admin/requests", requireAdmin, async (req, res, next) => {
+  try {
+    const result = await db.query(
+      `SELECT r.id,r.school_id,r.assessment_id,r.action,r.payload,r.created_at,s.name AS school_name
+       FROM assessment_requests r JOIN schools s ON s.id=r.school_id
+       WHERE r.school_id=$1 AND r.status='pending' ORDER BY r.created_at ASC`,
+      [req.session.admin.schoolId]
+    );
+    res.json({ requests: result.rows });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next) => {
+  const client = await db.pool.connect();
+  try {
+    const id = positiveInt(req.params.id);
+    const decision = req.body.decision;
+    if (!id || !["approve","reject"].includes(decision)) return res.status(400).json({ error: "승인 요청이 올바르지 않습니다." });
+    await client.query("BEGIN");
+    const request = await client.query(
+      "SELECT * FROM assessment_requests WHERE id=$1 AND school_id=$2 AND status='pending' FOR UPDATE",
+      [id, req.session.admin.schoolId]
+    );
+    if (!request.rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "대기 중인 요청을 찾을 수 없습니다." }); }
+    const row = request.rows[0];
+    if (decision === "approve") {
+      const p = row.payload;
+      if (row.action === "create") {
+        await client.query(
+          "INSERT INTO assessments (class_id,subject_id,title,details,due_date,created_by) VALUES ($1,$2,$3,$4,$5,NULL)",
+          [p.classId,p.subjectId,p.title,p.details,p.dueDate]
+        );
+      } else if (row.action === "edit") {
+        await client.query(
+          "UPDATE assessments SET class_id=$1,subject_id=$2,title=$3,details=$4,due_date=$5,updated_at=NOW() WHERE id=$6",
+          [p.classId,p.subjectId,p.title,p.details,p.dueDate,row.assessment_id]
+        );
+      }
+    }
+    await client.query(
+      "UPDATE assessment_requests SET status=$1, reviewed_at=NOW(), reviewed_by_school_admin=$2 WHERE id=$3",
+      [decision === "approve" ? "approved" : "rejected", req.session.admin.schoolId, id]
+    );
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error.code === "P0001") return res.status(400).json({ error: "학급과 과목은 같은 학교에 속해야 합니다." });
+    next(error);
+  } finally { client.release(); }
 });
 
 app.get("/api/schools", async (req, res, next) => {
@@ -147,7 +199,7 @@ app.get("/api/schools", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/schools", requireLogin, async (req, res, next) => {
+app.post("/api/schools", async (req, res, next) => {
   try {
     const name = textValue(req.body.name, 160);
     const region = typeof req.body.region === "string" ? req.body.region.trim().slice(0, 120) : "";
@@ -172,7 +224,7 @@ app.get("/api/schools/:schoolId/classes", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/classes", requireLogin, async (req, res, next) => {
+app.post("/api/classes", async (req, res, next) => {
   try {
     const schoolId = positiveInt(req.body.schoolId);
     const grade = Number(req.body.grade);
@@ -198,7 +250,7 @@ app.get("/api/schools/:schoolId/subjects", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/subjects", requireLogin, async (req, res, next) => {
+app.post("/api/subjects", async (req, res, next) => {
   try {
     const schoolId = positiveInt(req.body.schoolId);
     const name = textValue(req.body.name, 100);
@@ -225,7 +277,7 @@ app.get("/api/assessments", async (req, res, next) => {
        JOIN subjects s ON s.id = a.subject_id
        JOIN classes c ON c.id = a.class_id
        JOIN schools sc ON sc.id = c.school_id
-       WHERE a.class_id = $1
+       WHERE a.class_id = $1 AND a.status = 'approved'
        ORDER BY a.due_date ASC, a.id DESC`,
       [classId]
     );
@@ -233,56 +285,59 @@ app.get("/api/assessments", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/assessments", requireLogin, async (req, res, next) => {
-  try {
-    const classId = positiveInt(req.body.classId);
-    const subjectId = positiveInt(req.body.subjectId);
-    const title = textValue(req.body.title, 180);
-    const dueDate = typeof req.body.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.body.dueDate) ? req.body.dueDate : null;
-    const details = typeof req.body.details === "string" ? req.body.details.trim().slice(0, 3000) : "";
-    if (!classId || !subjectId || !title || !dueDate) {
-      return res.status(400).json({ error: "학급, 과목, 제목, 날짜를 모두 입력해 주세요." });
-    }
-    const result = await db.query(
-      "INSERT INTO assessments (class_id, subject_id, title, details, due_date, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, class_id, subject_id, title, details, to_char(due_date, 'YYYY-MM-DD') AS due_date, created_by",
-      [classId, subjectId, title, details, dueDate, req.session.user.id]
-    );
-    res.status(201).json({ assessment: result.rows[0] });
-  } catch (error) {
-    if (error.code === "P0001") return res.status(400).json({ error: "학급과 과목은 같은 학교에 속해야 합니다." });
-    next(error);
+async function validateAssessmentPayload(body) {
+  const classId = positiveInt(body.classId);
+  const subjectId = positiveInt(body.subjectId);
+  const title = textValue(body.title, 180);
+  const dueDate = typeof body.dueDate === "string" && /^\\d{4}-\\d{2}-\\d{2}$/.test(body.dueDate) ? body.dueDate : null;
+  const details = typeof body.details === "string" ? body.details.trim().slice(0, 3000) : "";
+  if (!classId || !subjectId || !title || !dueDate) return { error: "학급, 과목, 제목, 날짜를 모두 입력해 주세요." };
+  const context = await db.query(
+    "SELECT c.school_id,s.school_id AS subject_school_id FROM classes c CROSS JOIN subjects s WHERE c.id=$1 AND s.id=$2",
+    [classId, subjectId]
+  );
+  if (!context.rowCount || String(context.rows[0].school_id) !== String(context.rows[0].subject_school_id)) {
+    return { error: "학급과 과목은 같은 학교에 속해야 합니다." };
   }
+  return { payload: { classId, subjectId, title, details, dueDate }, schoolId: context.rows[0].school_id };
+}
+
+app.post("/api/assessments", async (req, res, next) => {
+  try {
+    const validated = await validateAssessmentPayload(req.body);
+    if (validated.error) return res.status(400).json({ error: validated.error });
+    await db.query(
+      "INSERT INTO assessment_requests (school_id,action,payload) VALUES ($1,'create',$2::jsonb)",
+      [validated.schoolId, JSON.stringify(validated.payload)]
+    );
+    res.status(202).json({ pending: true, message: "일정 등록 신청을 보냈어요. 학교 관리자 승인 후 공개됩니다." });
+  } catch (error) { next(error); }
 });
 
-app.put("/api/assessments/:id", requireLogin, async (req, res, next) => {
-  try {
-    const id = positiveInt(req.params.id);
-    const classId = positiveInt(req.body.classId);
-    const subjectId = positiveInt(req.body.subjectId);
-    const title = textValue(req.body.title, 180);
-    const dueDate = typeof req.body.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.body.dueDate) ? req.body.dueDate : null;
-    const details = typeof req.body.details === "string" ? req.body.details.trim().slice(0, 3000) : "";
-    if (!id || !classId || !subjectId || !title || !dueDate) return res.status(400).json({ error: "입력 내용을 확인해 주세요." });
-    const result = await db.query(
-      "UPDATE assessments SET class_id=$1, subject_id=$2, title=$3, details=$4, due_date=$5, updated_at=NOW() WHERE id=$6 AND created_by=$7 RETURNING id, class_id, subject_id, title, details, to_char(due_date, 'YYYY-MM-DD') AS due_date, created_by",
-      [classId, subjectId, title, details, dueDate, id, req.session.user.id]
-    );
-    if (!result.rowCount) return res.status(404).json({ error: "일정을 찾을 수 없거나 수정 권한이 없습니다." });
-    res.json({ assessment: result.rows[0] });
-  } catch (error) {
-    if (error.code === "P0001") return res.status(400).json({ error: "학급과 과목은 같은 학교에 속해야 합니다." });
-    next(error);
-  }
-});
-
-app.delete("/api/assessments/:id", requireLogin, async (req, res, next) => {
+app.put("/api/assessments/:id", async (req, res, next) => {
   try {
     const id = positiveInt(req.params.id);
     if (!id) return res.status(400).json({ error: "일정 ID가 올바르지 않습니다." });
-    const result = await db.query("DELETE FROM assessments WHERE id=$1 AND created_by=$2", [id, req.session.user.id]);
-    if (!result.rowCount) return res.status(404).json({ error: "일정을 찾을 수 없거나 삭제 권한이 없습니다." });
-    res.json({ ok: true });
+    const current = await db.query(
+      `SELECT a.id,c.school_id FROM assessments a JOIN classes c ON c.id=a.class_id
+       WHERE a.id=$1 AND a.status='approved'`, [id]
+    );
+    if (!current.rowCount) return res.status(404).json({ error: "일정을 찾을 수 없습니다." });
+    const validated = await validateAssessmentPayload(req.body);
+    if (validated.error) return res.status(400).json({ error: validated.error });
+    if (String(current.rows[0].school_id) !== String(validated.schoolId)) {
+      return res.status(400).json({ error: "일정은 원래 학교 안에서만 수정 신청할 수 있습니다." });
+    }
+    await db.query(
+      "INSERT INTO assessment_requests (school_id,assessment_id,action,payload) VALUES ($1,$2,'edit',$3::jsonb)",
+      [validated.schoolId,id,JSON.stringify(validated.payload)]
+    );
+    res.status(202).json({ pending: true, message: "수정 신청을 보냈어요. 관리자 승인 후 변경됩니다." });
   } catch (error) { next(error); }
+});
+
+app.delete("/api/assessments/:id", (req, res) => {
+  res.status(403).json({ error: "일정 삭제는 관리자에게 요청해 주세요." });
 });
 
 app.use("/api", (req, res) => {
