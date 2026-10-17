@@ -246,8 +246,10 @@ app.post("/api/schools", async (req, res, next) => {
   try {
     const name = textValue(req.body.name, 160);
     const region = typeof req.body.region === "string" ? req.body.region.trim().slice(0, 120) : "";
-    const officeCode = typeof req.body.officeCode === "string" ? req.body.officeCode.trim().slice(0, 10) : null;
-    const schoolCode = typeof req.body.schoolCode === "string" ? req.body.schoolCode.trim().slice(0, 20) : null;
+    const officeCodeValue = typeof req.body.officeCode === "string" ? req.body.officeCode.trim() : "";
+    const schoolCodeValue = typeof req.body.schoolCode === "string" ? req.body.schoolCode.trim() : "";
+    const officeCode = officeCodeValue ? officeCodeValue.slice(0, 10) : null;
+    const schoolCode = schoolCodeValue ? schoolCodeValue.slice(0, 20) : null;
     if (!name) return res.status(400).json({ error: "학교명을 입력해 주세요." });
     if ((officeCode && !schoolCode) || (!officeCode && schoolCode)) {
       return res.status(400).json({ error: "나이스 학교 코드 정보가 올바르지 않습니다." });
