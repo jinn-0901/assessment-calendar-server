@@ -109,7 +109,7 @@ app.get("/api/health", async (req, res) => {
 });
 
 app.get("/api/me", (req, res) => {
-  res.json({ admin: req.session.admin || null });
+  res.json({ admin: readAdminToken(req) || req.session.admin || null });
 });
 
 
