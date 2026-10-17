@@ -4,6 +4,7 @@ const session = require("express-session");
 const pgSession = require("connect-pg-simple")(session);
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
+const crypto = require("crypto");
 const db = require("./db");
 
 const app = express();
@@ -87,25 +88,123 @@ app.get("/api/me", (req, res) => {
   res.json({ admin: req.session.admin || null });
 });
 
-app.post("/api/admin/setup", async (req, res, next) => {
+
+function hashRegistrationCode(code) {
+  return crypto.createHash("sha256").update(code).digest("hex");
+}
+
+function makeRegistrationCode() {
+  return crypto.randomBytes(18).toString("base64url").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 24);
+}
+
+// First code: issued by the service operator after verifying the school's representative.
+// ADMIN_SETUP_KEY is only an operator credential; it is not a school-wide shared admin password.
+app.post("/api/admin/registration-codes/bootstrap", async (req, res, next) => {
+  const client = await db.pool.connect();
   try {
     const setupKey = typeof req.body.setupKey === "string" ? req.body.setupKey : "";
     const schoolId = positiveInt(req.body.schoolId);
-    const password = req.body.password;
     if (!process.env.ADMIN_SETUP_KEY || setupKey !== process.env.ADMIN_SETUP_KEY) {
-      return res.status(403).json({ error: "관리자 초기 설정 키가 올바르지 않습니다." });
+      return res.status(403).json({ error: "운영자 인증에 실패했습니다." });
     }
-    if (!schoolId || typeof password !== "string" || password.length < 12 || password.length > 128) {
-      return res.status(400).json({ error: "학교와 12자 이상의 관리자 비밀번호를 입력해 주세요." });
-    }
-    const exists = await db.query("SELECT id FROM schools WHERE id=$1", [schoolId]);
-    if (!exists.rowCount) return res.status(404).json({ error: "학교를 찾을 수 없습니다." });
-    const hash = await bcrypt.hash(password, 12);
-    await db.query(
-      "INSERT INTO school_admins (school_id,password_hash) VALUES ($1,$2) ON CONFLICT (school_id) DO UPDATE SET password_hash=EXCLUDED.password_hash",
-      [schoolId, hash]
+    if (!schoolId) return res.status(400).json({ error: "학교 선택이 올바르지 않습니다." });
+    await client.query("BEGIN");
+    const school = await client.query("SELECT id FROM schools WHERE id=$1 FOR UPDATE", [schoolId]);
+    if (!school.rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "학교를 찾을 수 없습니다." }); }
+    const existingAdmin = await client.query("SELECT school_id FROM school_admins WHERE school_id=$1", [schoolId]);
+    if (existingAdmin.rowCount) { await client.query("ROLLBACK"); return res.status(409).json({ error: "이 학교에는 이미 관리자가 등록되어 있습니다. 비밀번호 재설정 절차를 이용해 주세요." }); }
+    const code = makeRegistrationCode();
+    await client.query(
+      "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE school_id=$1 AND used_at IS NULL AND revoked_at IS NULL",
+      [schoolId]
     );
-    res.status(201).json({ ok: true });
+    await client.query(
+      "INSERT INTO school_admin_registration_codes (school_id,code_hash,expires_at,created_by) VALUES ($1,$2,NOW()+INTERVAL '24 hours','operator')",
+      [schoolId, hashRegistrationCode(code)]
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ schoolId, registrationCode: code, expiresInHours: 24 });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    next(error);
+  } finally { client.release(); }
+});
+
+// The one-time registration code can create exactly one administrator for its school.
+app.post("/api/admin/register", async (req, res, next) => {
+  const client = await db.pool.connect();
+  try {
+    const schoolId = positiveInt(req.body.schoolId);
+    const code = typeof req.body.registrationCode === "string" ? req.body.registrationCode.trim().toUpperCase() : "";
+    const password = req.body.password;
+    if (!schoolId || !/^[A-Z0-9]{20,24}$/.test(code) || typeof password !== "string" || password.length < 12 || password.length > 128) {
+      return res.status(400).json({ error: "학교, 등록 코드, 12자 이상의 비밀번호를 확인해 주세요." });
+    }
+    await client.query("BEGIN");
+    const school = await client.query("SELECT id,name FROM schools WHERE id=$1 FOR UPDATE", [schoolId]);
+    if (!school.rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "학교를 찾을 수 없습니다." }); }
+    const existing = await client.query("SELECT school_id FROM school_admins WHERE school_id=$1", [schoolId]);
+    if (existing.rowCount) { await client.query("ROLLBACK"); return res.status(409).json({ error: "이 학교에는 이미 관리자가 등록되어 있습니다." }); }
+    const codeResult = await client.query(
+      "SELECT id FROM school_admin_registration_codes WHERE school_id=$1 AND code_hash=$2 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>NOW() FOR UPDATE",
+      [schoolId, hashRegistrationCode(code)]
+    );
+    if (!codeResult.rowCount) { await client.query("ROLLBACK"); return res.status(403).json({ error: "등록 코드가 올바르지 않거나 만료·사용된 코드입니다." }); }
+    const passwordHash = await bcrypt.hash(password, 12);
+    await client.query("INSERT INTO school_admins (school_id,password_hash) VALUES ($1,$2)", [schoolId, passwordHash]);
+    await client.query("UPDATE school_admin_registration_codes SET used_at=NOW() WHERE id=$1", [codeResult.rows[0].id]);
+    await client.query("COMMIT");
+    res.status(201).json({ ok: true, message: "학교 관리자 등록이 완료됐습니다." });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error.code === "23505") return res.status(409).json({ error: "이 학교에는 이미 관리자가 등록되어 있거나 코드가 사용되었습니다." });
+    next(error);
+  } finally { client.release(); }
+});
+
+// A logged-in school administrator can issue a short-lived one-time code for a verified school representative.
+app.post("/api/admin/registration-codes", requireAdmin, async (req, res, next) => {
+  const client = await db.pool.connect();
+  try {
+    const schoolId = Number(req.session.admin.schoolId);
+    await client.query("BEGIN");
+    await client.query(
+      "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE school_id=$1 AND used_at IS NULL AND revoked_at IS NULL",
+      [schoolId]
+    );
+    const code = makeRegistrationCode();
+    await client.query(
+      "INSERT INTO school_admin_registration_codes (school_id,code_hash,expires_at,created_by) VALUES ($1,$2,NOW()+INTERVAL '24 hours',$3)",
+      [schoolId, hashRegistrationCode(code), "school_admin:" + schoolId]
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ registrationCode: code, expiresInHours: 24 });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    next(error);
+  } finally { client.release(); }
+});
+
+app.get("/api/admin/registration-codes", requireAdmin, async (req, res, next) => {
+  try {
+    const result = await db.query(
+      "SELECT id,expires_at,used_at,revoked_at,created_at FROM school_admin_registration_codes WHERE school_id=$1 ORDER BY created_at DESC LIMIT 20",
+      [req.session.admin.schoolId]
+    );
+    res.json({ codes: result.rows });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/registration-codes/:id/revoke", requireAdmin, async (req, res, next) => {
+  try {
+    const id = positiveInt(req.params.id);
+    if (!id) return res.status(400).json({ error: "코드 ID가 올바르지 않습니다." });
+    const result = await db.query(
+      "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE id=$1 AND school_id=$2 AND used_at IS NULL AND revoked_at IS NULL RETURNING id",
+      [id, req.session.admin.schoolId]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "폐기할 수 있는 코드를 찾을 수 없습니다." });
+    res.json({ ok: true });
   } catch (error) { next(error); }
 });
 
@@ -446,6 +545,8 @@ async function startServer() {
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10)");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_school_code VARCHAR(20)");
     await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_schools_neis_codes ON schools(neis_office_code, neis_school_code) WHERE neis_office_code IS NOT NULL AND neis_school_code IS NOT NULL");
+    await db.query("CREATE TABLE IF NOT EXISTS school_admin_registration_codes (id BIGSERIAL PRIMARY KEY, school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE, code_hash CHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ, created_by VARCHAR(160) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+    await db.query("CREATE INDEX IF NOT EXISTS idx_school_admin_registration_codes_school ON school_admin_registration_codes(school_id, created_at DESC)");
   } catch (error) {
     console.warn("School code migration skipped; database setup may be required:", error.message);
   }
