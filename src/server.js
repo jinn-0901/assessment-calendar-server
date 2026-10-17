@@ -94,7 +94,7 @@ function hashRegistrationCode(code) {
 }
 
 function makeRegistrationCode() {
-  return crypto.randomBytes(18).toString("base64url").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 24);
+  return crypto.randomBytes(12).toString("hex").toUpperCase();
 }
 
 // First code: issued by the service operator after verifying the school's representative.
@@ -130,7 +130,7 @@ app.post("/api/admin/registration-codes/bootstrap", async (req, res, next) => {
   } finally { client.release(); }
 });
 
-// The one-time registration code can create exactly one administrator for its school.
+// A valid one-time code creates the first administrator or resets/transfers the single school administrator account.
 app.post("/api/admin/register", async (req, res, next) => {
   const client = await db.pool.connect();
   try {
@@ -143,21 +143,19 @@ app.post("/api/admin/register", async (req, res, next) => {
     await client.query("BEGIN");
     const school = await client.query("SELECT id,name FROM schools WHERE id=$1 FOR UPDATE", [schoolId]);
     if (!school.rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "학교를 찾을 수 없습니다." }); }
-    const existing = await client.query("SELECT school_id FROM school_admins WHERE school_id=$1", [schoolId]);
-    if (existing.rowCount) { await client.query("ROLLBACK"); return res.status(409).json({ error: "이 학교에는 이미 관리자가 등록되어 있습니다." }); }
     const codeResult = await client.query(
       "SELECT id FROM school_admin_registration_codes WHERE school_id=$1 AND code_hash=$2 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>NOW() FOR UPDATE",
       [schoolId, hashRegistrationCode(code)]
     );
     if (!codeResult.rowCount) { await client.query("ROLLBACK"); return res.status(403).json({ error: "등록 코드가 올바르지 않거나 만료·사용된 코드입니다." }); }
     const passwordHash = await bcrypt.hash(password, 12);
-    await client.query("INSERT INTO school_admins (school_id,password_hash) VALUES ($1,$2)", [schoolId, passwordHash]);
+    await client.query("INSERT INTO school_admins (school_id,password_hash) VALUES ($1,$2) ON CONFLICT (school_id) DO UPDATE SET password_hash=EXCLUDED.password_hash", [schoolId, passwordHash]);
     await client.query("UPDATE school_admin_registration_codes SET used_at=NOW() WHERE id=$1", [codeResult.rows[0].id]);
     await client.query("COMMIT");
     res.status(201).json({ ok: true, message: "학교 관리자 등록이 완료됐습니다." });
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
-    if (error.code === "23505") return res.status(409).json({ error: "이 학교에는 이미 관리자가 등록되어 있거나 코드가 사용되었습니다." });
+    if (error.code === "23505") return res.status(409).json({ error: "등록 코드가 이미 사용되었습니다. 새 코드를 요청해 주세요." });
     next(error);
   } finally { client.release(); }
 });
