@@ -697,6 +697,94 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: "서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." });
 });
 
+
+function seoulDateString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+// March 1 is a Korean public holiday. If it falls on a weekend, the
+// following Monday is the substitute holiday; cleanup runs on the next
+// weekday after the holiday(s).
+function annualAssessmentCleanupDate(year) {
+  const marchFirst = new Date(Date.UTC(year, 2, 1));
+  const marchFirstDay = marchFirst.getUTCDay();
+  const hasSubstituteHoliday = marchFirstDay === 0 || marchFirstDay === 6;
+  const date = new Date(Date.UTC(year, 2, 2));
+
+  while (true) {
+    const day = date.getUTCDay();
+    const isWeekend = day === 0 || day === 6;
+    const isSubstituteHoliday = hasSubstituteHoliday && day === 1;
+    if (!isWeekend && !isSubstituteHoliday) {
+      return date.toISOString().slice(0, 10);
+    }
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+}
+
+async function runAnnualAssessmentCleanupIfDue() {
+  const today = seoulDateString();
+  const year = Number(today.slice(0, 4));
+  const runDate = annualAssessmentCleanupDate(year);
+  if (today < runDate) return;
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    const claim = await client.query(
+      "INSERT INTO assessment_cleanup_runs (school_year, cleanup_date) VALUES ($1, $2::date) ON CONFLICT (school_year) DO NOTHING RETURNING school_year",
+      [year, runDate]
+    );
+    if (!claim.rowCount) {
+      await client.query("ROLLBACK");
+      return;
+    }
+
+    // Only remove assessments that ended before March 1. Events on or after
+    // March 1 remain, and pending student requests are intentionally untouched.
+    const deleted = await client.query(
+      "DELETE FROM assessments WHERE end_date < $1::date RETURNING id",
+      [`${year}-03-01`]
+    );
+    await client.query("COMMIT");
+    console.log(
+      `Annual assessment cleanup completed for ${year}: ${deleted.rowCount} expired assessment(s) removed.`
+    );
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("Annual assessment cleanup failed:", error.message);
+  } finally {
+    client.release();
+  }
+}
+
+async function startAnnualAssessmentCleanup() {
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS assessment_cleanup_runs (
+      school_year INTEGER PRIMARY KEY,
+      cleanup_date DATE NOT NULL,
+      completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    // Check at startup and once per minute. If Render sleeps through the
+    // target date, the cleanup runs the next time the service wakes up.
+    await runAnnualAssessmentCleanupIfDue();
+    setInterval(() => {
+      runAnnualAssessmentCleanupIfDue().catch((error) => {
+        console.error("Annual assessment cleanup check failed:", error.message);
+      });
+    }, 60 * 1000);
+  } catch (error) {
+    console.error("Could not initialize annual assessment cleanup:", error.message);
+  }
+}
+
 async function startServer() {
   try {
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS created_by_admin BOOLEAN NOT NULL DEFAULT FALSE");
@@ -717,6 +805,7 @@ async function startServer() {
     console.warn("School code migration skipped; database setup may be required:", error.message);
   }
   app.listen(port, () => console.log(`Assessment Calendar server listening on port ${port}`));
+  startAnnualAssessmentCleanup();
 }
 
 startServer();
