@@ -750,7 +750,15 @@ async function runAnnualAssessmentCleanupIfDue() {
     // Only remove assessments that ended before March 1. Events on or after
     // March 1 remain, and pending student requests are intentionally untouched.
     const deleted = await client.query(
-      "DELETE FROM assessments WHERE end_date < $1::date RETURNING id",
+      `DELETE FROM assessments AS a
+       WHERE a.end_date < $1::date
+         AND NOT EXISTS (
+           SELECT 1
+           FROM assessment_requests AS r
+           WHERE r.assessment_id = a.id
+             AND r.status = 'pending'
+         )
+       RETURNING a.id`,
       [`${year}-03-01`]
     );
     await client.query("COMMIT");
