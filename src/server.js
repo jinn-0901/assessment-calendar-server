@@ -739,7 +739,7 @@ async function runAnnualAssessmentCleanupIfDue() {
   try {
     await client.query("BEGIN");
     const claim = await client.query(
-      "INSERT INTO assessment_cleanup_runs (school_year, cleanup_date) VALUES ($1, $2::date) ON CONFLICT (school_year) DO NOTHING RETURNING school_year",
+      "INSERT INTO assessment_cleanup_runs (school_year, cleanup_date, status) VALUES ($1, $2::date, 'completed') ON CONFLICT (school_year) DO NOTHING RETURNING school_year",
       [year, runDate]
     );
     if (!claim.rowCount) {
@@ -767,14 +767,33 @@ async function runAnnualAssessmentCleanupIfDue() {
 
 async function startAnnualAssessmentCleanup() {
   try {
+    const existing = await db.query("SELECT to_regclass('public.assessment_cleanup_runs') AS table_name");
+    const isFirstInitialization = !existing.rows[0]?.table_name;
     await db.query(`CREATE TABLE IF NOT EXISTS assessment_cleanup_runs (
       school_year INTEGER PRIMARY KEY,
       cleanup_date DATE NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'completed' CHECK (status IN ('completed', 'skipped')),
       completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
-    // Check at startup and once per minute. If Render sleeps through the
-    // target date, the cleanup runs the next time the service wakes up.
-    await runAnnualAssessmentCleanupIfDue();
+    await db.query("ALTER TABLE assessment_cleanup_runs ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'completed'");
+
+    const today = seoulDateString();
+    const year = Number(today.slice(0, 4));
+    const runDate = annualAssessmentCleanupDate(year);
+    // Do not unexpectedly purge old schedules when this feature is first
+    // installed after this year's scheduled date. Future years still run.
+    if (isFirstInitialization && today > runDate) {
+      await db.query(
+        "INSERT INTO assessment_cleanup_runs (school_year, cleanup_date, status) VALUES ($1, $2::date, 'skipped') ON CONFLICT (school_year) DO NOTHING",
+        [year, runDate]
+      );
+      console.log(`Annual assessment cleanup initialized after ${runDate}; first run is deferred to next school year.`);
+    } else {
+      // If an already-initialized service was asleep through the target date,
+      // catch up when it next wakes. The yearly record prevents duplicate runs.
+      await runAnnualAssessmentCleanupIfDue();
+    }
+
     setInterval(() => {
       runAnnualAssessmentCleanupIfDue().catch((error) => {
         console.error("Annual assessment cleanup check failed:", error.message);
