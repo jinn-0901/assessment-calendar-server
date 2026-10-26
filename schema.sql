@@ -84,8 +84,10 @@ FOR EACH ROW EXECUTE FUNCTION validate_assessment_school();
 CREATE TABLE IF NOT EXISTS school_admins (
   school_id BIGINT PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
   password_hash TEXT NOT NULL,
+  auth_version INTEGER NOT NULL DEFAULT 1 CHECK (auth_version >= 1),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE school_admins ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1;
 
 -- New schedules and edits are invisible until a school admin approves them.
 CREATE TABLE IF NOT EXISTS assessment_requests (
