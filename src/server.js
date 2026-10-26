@@ -59,6 +59,17 @@ app.use(session({
 
 app.use("/api/admin", rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false }));
 
+// Limit unauthenticated writes to prevent public endpoints from being used to
+// flood school metadata or create excessive pending assessment requests.
+const publicMutationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => Boolean(readAdminToken(req) || req.session?.admin),
+  message: { error: "요청이 너무 많아요. 잠시 후 다시 시도해 주세요." }
+});
+
 function signAdminToken(admin) {
   const payload = Buffer.from(JSON.stringify({ ...admin, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 })).toString("base64url");
   const signature = crypto.createHmac("sha256", process.env.SESSION_SECRET || "local-development-only-change-this-secret").update(payload).digest("base64url");
@@ -507,7 +518,7 @@ app.get("/api/schools", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/schools", async (req, res, next) => {
+app.post("/api/schools", publicMutationLimiter, async (req, res, next) => {
   try {
     const name = textValue(req.body.name, 160);
     const region = typeof req.body.region === "string" ? req.body.region.trim().slice(0, 120) : "";
@@ -539,7 +550,7 @@ app.get("/api/schools/:schoolId/classes", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/classes", async (req, res, next) => {
+app.post("/api/classes", publicMutationLimiter, async (req, res, next) => {
   try {
     const schoolId = positiveInt(req.body.schoolId);
     const grade = Number(req.body.grade);
@@ -565,7 +576,7 @@ app.get("/api/schools/:schoolId/subjects", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/subjects", async (req, res, next) => {
+app.post("/api/subjects", publicMutationLimiter, async (req, res, next) => {
   try {
     const schoolId = positiveInt(req.body.schoolId);
     const name = textValue(req.body.name, 100);
@@ -628,7 +639,7 @@ async function validateAssessmentPayload(body) {
   return { payload: { classId, subjectId, title, details, startDate, endDate, startTime, endTime, dueDate: endDate, dueTime: endTime }, schoolId: context.rows[0].school_id };
 }
 
-app.post("/api/assessments", async (req, res, next) => {
+app.post("/api/assessments", publicMutationLimiter, async (req, res, next) => {
   try {
     const validated = await validateAssessmentPayload(req.body);
     if (validated.error) return res.status(400).json({ error: validated.error });
@@ -649,7 +660,7 @@ app.post("/api/assessments", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.put("/api/assessments/:id", async (req, res, next) => {
+app.put("/api/assessments/:id", publicMutationLimiter, async (req, res, next) => {
   try {
     const id = positiveInt(req.params.id);
     if (!id) return res.status(400).json({ error: "일정 ID가 올바르지 않습니다." });
