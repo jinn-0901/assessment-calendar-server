@@ -21,10 +21,33 @@ const allowedOrigins = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL ||
   .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
-// CORS must allow the exact frontend origin because session cookies are used.
+// CORS alone does not stop cross-site HTML form submissions. Validate origins
+// for every unsafe production request before dispatching API handlers.
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin.replace(/\/$/, ""))) {
+  const normalizedOrigin = typeof origin === "string" ? origin.replace(/\/$/, "") : "";
+  const isUnsafeMethod = !["GET", "HEAD", "OPTIONS"].includes(req.method);
+  const hasSessionCookie = (req.headers.cookie || "").split(";").some((part) =>
+    part.trim().startsWith("assessment.sid=")
+  );
+  let refererOrigin = "";
+  if (typeof req.headers.referer === "string") {
+    try { refererOrigin = new URL(req.headers.referer).origin; } catch { /* invalid Referer */ }
+  }
+
+  if (isProduction && isUnsafeMethod) {
+    if (origin && !allowedOrigins.includes(normalizedOrigin)) {
+      return res.status(403).json({ error: "허용되지 않은 요청 출처입니다." });
+    }
+    if (!origin && refererOrigin && !allowedOrigins.includes(refererOrigin)) {
+      return res.status(403).json({ error: "허용되지 않은 요청 출처입니다." });
+    }
+    if (hasSessionCookie && !origin && !refererOrigin) {
+      return res.status(403).json({ error: "요청 출처를 확인할 수 없습니다. 페이지를 새로고침해 주세요." });
+    }
+  }
+
+  if (origin && allowedOrigins.includes(normalizedOrigin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Access-Control-Allow-Credentials", "true");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
@@ -57,7 +80,21 @@ app.use(session({
   }
 }));
 
+app.use("/api/admin", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  next();
+});
 app.use("/api/admin", rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false }));
+
+const sensitiveAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "인증 시도가 너무 많아요. 15분 후 다시 시도해 주세요." }
+});
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString("hex"), 12);
 
 // Limit unauthenticated writes to prevent public endpoints from being used to
 // flood school metadata or create excessive pending assessment requests.
@@ -66,13 +103,18 @@ const publicMutationLimiter = rateLimit({
   limit: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => Boolean(readAdminToken(req) || req.session?.admin),
   message: { error: "요청이 너무 많아요. 잠시 후 다시 시도해 주세요." }
 });
 
+function adminTokenSigningKey() {
+  return crypto.createHmac("sha256", process.env.SESSION_SECRET || "local-development-only-change-this-secret")
+    .update("assessment-calendar:admin-token:v1")
+    .digest();
+}
+
 function signAdminToken(admin) {
-  const payload = Buffer.from(JSON.stringify({ ...admin, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 })).toString("base64url");
-  const signature = crypto.createHmac("sha256", process.env.SESSION_SECRET || "local-development-only-change-this-secret").update(payload).digest("base64url");
+  const payload = Buffer.from(JSON.stringify({ ...admin, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 })).toString("base64url");
+  const signature = crypto.createHmac("sha256", adminTokenSigningKey()).update(payload).digest("base64url");
   return payload + "." + signature;
 }
 
@@ -81,22 +123,37 @@ function readAdminToken(req) {
   if (!header.startsWith("Bearer ")) return null;
   const parts = header.slice(7).split(".");
   if (parts.length !== 2) return null;
-  const expected = crypto.createHmac("sha256", process.env.SESSION_SECRET || "local-development-only-change-this-secret").update(parts[0]).digest();
+  const expected = crypto.createHmac("sha256", adminTokenSigningKey()).update(parts[0]).digest();
   let actual;
   try { actual = Buffer.from(parts[1], "base64url"); } catch { return null; }
   if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return null;
   try {
     const payload = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
-    if (!payload.schoolId || !payload.schoolName || !Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
-    return { schoolId: String(payload.schoolId), schoolName: payload.schoolName };
+    if (!payload.schoolId || !payload.schoolName || !Number.isSafeInteger(payload.authVersion) || payload.authVersion < 1 || !Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+    return { schoolId: String(payload.schoolId), schoolName: payload.schoolName, authVersion: payload.authVersion };
   } catch { return null; }
 }
 
+async function getValidAdmin(req) {
+  const admin = readAdminToken(req) || req.session?.admin || null;
+  if (!admin || !Number.isSafeInteger(Number(admin.authVersion))) return null;
+  const result = await db.query(
+    "SELECT a.auth_version,s.name AS school_name FROM school_admins a JOIN schools s ON s.id=a.school_id WHERE a.school_id=$1",
+    [admin.schoolId]
+  );
+  if (!result.rowCount || Number(result.rows[0].auth_version) !== Number(admin.authVersion)) return null;
+  return { schoolId: String(admin.schoolId), schoolName: result.rows[0].school_name, authVersion: Number(result.rows[0].auth_version) };
+}
+
 function requireAdmin(req, res, next) {
-  const admin = readAdminToken(req);
-  if (admin) { req.admin = admin; return next(); }
-  if (req.session?.admin) { req.admin = req.session.admin; return next(); }
-  return res.status(401).json({ error: "관리자 인증이 만료되었어요. 다시 로그인해 주세요." });
+  getValidAdmin(req).then((admin) => {
+    if (!admin) {
+      if (req.session?.admin) delete req.session.admin;
+      return res.status(401).json({ error: "관리자 인증이 만료되었어요. 다시 로그인해 주세요." });
+    }
+    req.admin = admin;
+    next();
+  }).catch(next);
 }
 
 function positiveInt(value) {
@@ -119,8 +176,17 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-app.get("/api/me", (req, res) => {
-  res.json({ admin: readAdminToken(req) || req.session.admin || null });
+app.get("/api/me", async (req, res, next) => {
+  try {
+    const hasCredential = Boolean((req.headers.authorization || "").startsWith("Bearer ") || req.session?.admin);
+    const admin = await getValidAdmin(req);
+    if (hasCredential && !admin) {
+      if (req.session?.admin) delete req.session.admin;
+      return res.status(401).json({ error: "관리자 인증이 만료되었어요. 다시 로그인해 주세요." });
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ admin });
+  } catch (error) { next(error); }
 });
 
 
@@ -134,7 +200,7 @@ function makeRegistrationCode() {
 
 // First code: issued by the service operator after verifying the school's representative.
 // ADMIN_SETUP_KEY is only an operator credential; it is not a school-wide shared admin password.
-app.post("/api/admin/registration-codes/bootstrap", async (req, res, next) => {
+app.post("/api/admin/registration-codes/bootstrap", sensitiveAuthLimiter, async (req, res, next) => {
   let client;
   try {
     client = await db.pool.connect();
@@ -165,15 +231,15 @@ app.post("/api/admin/registration-codes/bootstrap", async (req, res, next) => {
 });
 
 // A valid one-time code creates the first administrator or resets/transfers the single school administrator account.
-app.post("/api/admin/register", async (req, res, next) => {
+app.post("/api/admin/register", sensitiveAuthLimiter, async (req, res, next) => {
   let client;
   try {
     client = await db.pool.connect();
     const schoolId = positiveInt(req.body.schoolId);
     const code = typeof req.body.registrationCode === "string" ? req.body.registrationCode.trim().toUpperCase() : "";
     const password = req.body.password;
-    if (!schoolId || !/^[A-Z0-9]{20,24}$/.test(code) || typeof password !== "string" || password.length < 12 || password.length > 128) {
-      return res.status(400).json({ error: "학교, 등록 코드, 12자 이상의 비밀번호를 확인해 주세요." });
+    if (!schoolId || !/^[A-Z0-9]{20,24}$/.test(code) || typeof password !== "string" || password.length < 12 || Buffer.byteLength(password, "utf8") > 72) {
+      return res.status(400).json({ error: "학교와 등록 코드를 확인하고, 비밀번호는 12자 이상·UTF-8 72바이트 이내로 설정해 주세요." });
     }
     await client.query("BEGIN");
     const school = await client.query("SELECT id,name FROM schools WHERE id=$1 FOR UPDATE", [schoolId]);
@@ -184,7 +250,7 @@ app.post("/api/admin/register", async (req, res, next) => {
     );
     if (!codeResult.rowCount) { await client.query("ROLLBACK"); return res.status(403).json({ error: "등록 코드가 올바르지 않거나 만료·사용된 코드입니다." }); }
     const passwordHash = await bcrypt.hash(password, 12);
-    await client.query("INSERT INTO school_admins (school_id,password_hash) VALUES ($1,$2) ON CONFLICT (school_id) DO UPDATE SET password_hash=EXCLUDED.password_hash", [schoolId, passwordHash]);
+    await client.query("INSERT INTO school_admins (school_id,password_hash,auth_version) VALUES ($1,$2,1) ON CONFLICT (school_id) DO UPDATE SET password_hash=EXCLUDED.password_hash, auth_version=school_admins.auth_version+1", [schoolId, passwordHash]);
     await client.query("DELETE FROM school_admin_registration_codes WHERE id=$1", [codeResult.rows[0].id]);
     await client.query("COMMIT");
     res.status(201).json({ ok: true, message: "학교 관리자 등록이 완료됐습니다." });
@@ -243,35 +309,37 @@ app.post("/api/admin/registration-codes/:id/revoke", requireAdmin, async (req, r
   } catch (error) { next(error); }
 });
 
-app.post("/api/admin/login", async (req, res, next) => {
+app.post("/api/admin/login", sensitiveAuthLimiter, async (req, res, next) => {
   try {
     const schoolId = positiveInt(req.body.schoolId);
     const password = typeof req.body.password === "string" ? req.body.password : "";
     const result = await db.query(
-      "SELECT a.school_id,a.password_hash,s.name AS school_name FROM school_admins a JOIN schools s ON s.id=a.school_id WHERE a.school_id=$1",
+      "SELECT a.school_id,a.password_hash,a.auth_version,s.name AS school_name FROM school_admins a JOIN schools s ON s.id=a.school_id WHERE a.school_id=$1",
       [schoolId]
     );
     const admin = result.rows[0];
-    if (!admin || !(await bcrypt.compare(password, admin.password_hash))) {
+    const passwordMatches = await bcrypt.compare(password, admin?.password_hash || DUMMY_PASSWORD_HASH);
+    if (!admin || !passwordMatches) {
       return res.status(401).json({ error: "학교 또는 관리자 비밀번호를 확인해 주세요." });
     }
     req.session.regenerate((error) => {
       if (error) return next(error);
-      req.session.admin = { schoolId: String(admin.school_id), schoolName: admin.school_name };
+      req.session.admin = { schoolId: String(admin.school_id), schoolName: admin.school_name, authVersion: Number(admin.auth_version) };
       req.session.save((saveError) => {
         if (saveError) return next(saveError);
+        res.setHeader("Cache-Control", "no-store");
         res.json({ admin: req.session.admin, token: signAdminToken(req.session.admin) });
       });
     });
   } catch (error) { next(error); }
 });
 
-app.post("/api/admin/password", requireAdmin, async (req, res, next) => {
+app.post("/api/admin/password", sensitiveAuthLimiter, requireAdmin, async (req, res, next) => {
   try {
     const currentPassword = typeof req.body.currentPassword === "string" ? req.body.currentPassword : "";
     const newPassword = typeof req.body.newPassword === "string" ? req.body.newPassword : "";
-    if (newPassword.length < 12 || newPassword.length > 128) {
-      return res.status(400).json({ error: "새 비밀번호는 12~128자로 설정해 주세요." });
+    if (newPassword.length < 12 || Buffer.byteLength(newPassword, "utf8") > 72) {
+      return res.status(400).json({ error: "새 비밀번호는 12자 이상이며 UTF-8 기준 72바이트 이내여야 합니다." });
     }
     const result = await db.query(
       "SELECT password_hash FROM school_admins WHERE school_id=$1",
@@ -281,17 +349,28 @@ app.post("/api/admin/password", requireAdmin, async (req, res, next) => {
       return res.status(403).json({ error: "현재 비밀번호가 올바르지 않습니다." });
     }
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    await db.query("UPDATE school_admins SET password_hash=$1 WHERE school_id=$2", [passwordHash, (req.admin || req.session.admin).schoolId]);
-    res.json({ ok: true, message: "관리자 비밀번호가 변경되었습니다." });
+    const updated = await db.query(
+      "UPDATE school_admins SET password_hash=$1, auth_version=auth_version+1 WHERE school_id=$2 RETURNING auth_version",
+      [passwordHash, req.admin.schoolId]
+    );
+    const nextAdmin = { schoolId: req.admin.schoolId, schoolName: req.admin.schoolName, authVersion: Number(updated.rows[0].auth_version) };
+    req.session.admin = nextAdmin;
+    await new Promise((resolve, reject) => req.session.save((error) => error ? reject(error) : resolve()));
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, message: "관리자 비밀번호가 변경되었습니다.", token: signAdminToken(nextAdmin) });
   } catch (error) { next(error); }
 });
 
-app.post("/api/admin/logout", requireAdmin, (req, res, next) => {
-  req.session.destroy((error) => {
-    if (error) return next(error);
-    res.clearCookie("assessment.sid", { httpOnly: true, sameSite: isProduction ? "none" : "lax", secure: isProduction });
-    res.json({ ok: true });
-  });
+app.post("/api/admin/logout", requireAdmin, async (req, res, next) => {
+  try {
+    await db.query("UPDATE school_admins SET auth_version=auth_version+1 WHERE school_id=$1", [req.admin.schoolId]);
+    req.session.destroy((error) => {
+      if (error) return next(error);
+      res.clearCookie("assessment.sid", { httpOnly: true, sameSite: isProduction ? "none" : "lax", secure: isProduction });
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ ok: true });
+    });
+  } catch (error) { next(error); }
 });
 
 app.get("/api/admin/requests", requireAdmin, async (req, res, next) => {
@@ -647,7 +726,9 @@ app.post("/api/assessments", publicMutationLimiter, async (req, res, next) => {
   try {
     const validated = await validateAssessmentPayload(req.body);
     if (validated.error) return res.status(400).json({ error: validated.error });
-    const admin = readAdminToken(req) || req.session?.admin || null;
+    const hasAdminCredential = Boolean((req.headers.authorization || "").startsWith("Bearer ") || req.session?.admin);
+    const admin = await getValidAdmin(req);
+    if (hasAdminCredential && !admin) return res.status(401).json({ error: "관리자 인증이 만료되었어요. 다시 로그인해 주세요." });
     if (admin) {
       if (String(admin.schoolId) !== String(validated.schoolId)) return res.status(403).json({ error: "관리자는 본인 학교의 일정만 등록할 수 있어요." });
       const result = await db.query(
@@ -678,7 +759,9 @@ app.put("/api/assessments/:id", publicMutationLimiter, async (req, res, next) =>
     if (String(current.rows[0].school_id) !== String(validated.schoolId)) {
       return res.status(400).json({ error: "일정은 원래 학교 안에서만 수정 신청할 수 있습니다." });
     }
-    const admin = readAdminToken(req) || req.session?.admin || null;
+    const hasAdminCredential = Boolean((req.headers.authorization || "").startsWith("Bearer ") || req.session?.admin);
+    const admin = await getValidAdmin(req);
+    if (hasAdminCredential && !admin) return res.status(401).json({ error: "관리자 인증이 만료되었어요. 다시 로그인해 주세요." });
     if (admin) {
       if (String(admin.schoolId) !== String(current.rows[0].school_id) || String(admin.schoolId) !== String(validated.schoolId)) {
         return res.status(403).json({ error: "관리자는 본인 학교의 일정만 수정할 수 있어요." });
@@ -715,7 +798,7 @@ app.use("/api", (req, res) => {
 });
 
 app.use((error, req, res, next) => {
-  console.error(error);
+  console.error("Unhandled API error:", error.message, error.code ? `[code ${error.code}]` : "");
   if (res.headersSent) return next(error);
   res.status(500).json({ error: "서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." });
 });
@@ -845,6 +928,7 @@ async function startServer() {
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS start_time TIME");
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS end_time TIME");
     await db.query("UPDATE assessments SET start_date = COALESCE(start_date, due_date), end_date = COALESCE(end_date, due_date), end_time = COALESCE(end_time, due_time) WHERE start_date IS NULL OR end_date IS NULL OR end_time IS NULL");
+    await db.query("ALTER TABLE school_admins ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10)");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_school_code VARCHAR(20)");
     await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_schools_neis_codes ON schools(neis_office_code, neis_school_code) WHERE neis_office_code IS NOT NULL AND neis_school_code IS NOT NULL");
@@ -853,7 +937,8 @@ async function startServer() {
     await db.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
     await db.query("DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')");
   } catch (error) {
-    console.warn("School code migration skipped; database setup may be required:", error.message);
+    console.error("Database migration failed; server startup aborted:", error.message);
+    process.exit(1);
   }
   app.listen(port, () => console.log(`Assessment Calendar server listening on port ${port}`));
   startAnnualAssessmentCleanup();
