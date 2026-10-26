@@ -8,7 +8,7 @@ const crypto = require("crypto");
 const db = require("./db");
 
 const app = express();
-const isProduction = process.env.NODE_ENV === "production";
+const isProduction = process.env.NODE_ENV === "production" || process.env.RENDER === "true";
 const port = process.env.PORT || 3000;
 const allowedOrigins = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "")
   .split(",")
