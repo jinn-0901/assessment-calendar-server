@@ -23,6 +23,6 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
       - name: Check JavaScript syntax
-        run: node --check src/server.js
+        run: node --check src/server.js && node --check src/db.js
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
