@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const db = require("./db");
 
 const app = express();
+app.disable("x-powered-by");
 const isProduction = process.env.NODE_ENV === "production" || process.env.RENDER === "true";
 const port = process.env.PORT || 3000;
 const allowedOrigins = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "")
@@ -814,8 +815,14 @@ app.use("/api", (req, res) => {
 });
 
 app.use((error, req, res, next) => {
-  console.error("Unhandled API error:", error.message, error.code ? `[code ${error.code}]` : "");
   if (res.headersSent) return next(error);
+  if (error?.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "요청 본문 형식이 올바르지 않습니다." });
+  }
+  if (error?.type === "entity.too.large") {
+    return res.status(413).json({ error: "요청 본문 크기가 허용 범위를 초과했습니다." });
+  }
+  console.error("Unhandled API error:", error.message, error.code ? `[code ${error.code}]` : "");
   res.status(500).json({ error: "서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." });
 });
 
