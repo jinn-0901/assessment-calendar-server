@@ -793,7 +793,7 @@ async function runAnnualAssessmentCleanupIfDue() {
     if (client) await client.query("ROLLBACK").catch(() => {});
     console.error("Annual assessment cleanup failed:", error.message);
   } finally {
-    client.release();
+    client?.release();
   }
 }
 
