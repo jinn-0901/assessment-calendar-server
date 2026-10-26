@@ -11,8 +11,23 @@ const app = express();
 const isProduction = process.env.NODE_ENV === "production";
 const port = process.env.PORT || 3000;
 
-if (isProduction && !process.env.SESSION_SECRET) {
-  throw new Error("SESSION_SECRET must be set in the server environment.");
+if (isProduction) {
+  if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
+    throw new Error("SESSION_SECRET must be a strong random value of at least 32 characters in production.");
+  }
+  if (!process.env.ADMIN_SETUP_KEY || process.env.ADMIN_SETUP_KEY.length < 32) {
+    throw new Error("ADMIN_SETUP_KEY must be a strong random value of at least 32 characters in production.");
+  }
+  if (!allowedOrigins.length) {
+    throw new Error("Set FRONTEND_URL or FRONTEND_URLS to the exact HTTPS frontend origin in production.");
+  }
+  for (const allowedOrigin of allowedOrigins) {
+    let parsed;
+    try { parsed = new URL(allowedOrigin); } catch { throw new Error("Every FRONTEND_URLS entry must be a valid HTTPS origin."); }
+    if (parsed.protocol !== "https:" || parsed.origin !== allowedOrigin) {
+      throw new Error("Every FRONTEND_URLS entry must be an origin only, such as https://example.com, without a path.");
+    }
+  }
 }
 if (isProduction) app.set("trust proxy", 1);
 
@@ -206,9 +221,11 @@ app.post("/api/admin/registration-codes/bootstrap", sensitiveAuthLimiter, async 
     client = await db.pool.connect();
     const setupKey = typeof req.body.setupKey === "string" ? req.body.setupKey : "";
     const schoolId = positiveInt(req.body.schoolId);
-    if (!process.env.ADMIN_SETUP_KEY || setupKey !== process.env.ADMIN_SETUP_KEY) {
-      return res.status(403).json({ error: "운영자 인증에 실패했습니다." });
-    }
+    const expectedKey = Buffer.from(process.env.ADMIN_SETUP_KEY || "", "utf8");
+    const providedKey = Buffer.from(setupKey, "utf8");
+    const keyMatches = expectedKey.length > 0 && providedKey.length === expectedKey.length &&
+      crypto.timingSafeEqual(providedKey, expectedKey);
+    if (!keyMatches) return res.status(403).json({ error: "운영자 인증에 실패했습니다." });
     if (!schoolId) return res.status(400).json({ error: "학교 선택이 올바르지 않습니다." });
     await client.query("BEGIN");
     const school = await client.query("SELECT id FROM schools WHERE id=$1 FOR UPDATE", [schoolId]);
