@@ -417,7 +417,13 @@ app.get("/api/neis/classes", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120, s
 });
 
 
-function validNeisDate(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value.replace(/-/g, "") : null; }
+function isValidDateString(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(value + "T00:00:00Z");
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function validNeisDate(value) { return isValidDateString(value) ? value.replace(/-/g, "") : null; }
 
 async function fetchNeisRows(endpoint, params) {
   const key = process.env.NEIS_API_KEY;
@@ -603,8 +609,10 @@ async function validateAssessmentPayload(body) {
   const classId = positiveInt(body.classId);
   const subjectId = positiveInt(body.subjectId);
   const title = textValue(body.title, 180);
-  const startDate = typeof (body.startDate || body.dueDate) === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.startDate || body.dueDate) ? (body.startDate || body.dueDate) : null;
-  const endDate = typeof (body.endDate || body.dueDate) === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.endDate || body.dueDate) ? (body.endDate || body.dueDate) : null;
+  const startDateValue = body.startDate || body.dueDate;
+  const endDateValue = body.endDate || body.dueDate;
+  const startDate = isValidDateString(startDateValue) ? startDateValue : null;
+  const endDate = isValidDateString(endDateValue) ? endDateValue : null;
   const startTime = body.startTime == null || body.startTime === "" ? null : (typeof body.startTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.startTime) ? body.startTime : undefined);
   const endTime = body.endTime == null || body.endTime === "" ? (body.dueTime == null || body.dueTime === "" ? null : (typeof body.dueTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.dueTime) ? body.dueTime : undefined)) : (typeof body.endTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.endTime) ? body.endTime : undefined);
   const details = typeof body.details === "string" ? body.details.trim().slice(0, 3000) : "";
@@ -821,13 +829,13 @@ async function startServer() {
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS start_time TIME");
     await db.query("ALTER TABLE assessments ADD COLUMN IF NOT EXISTS end_time TIME");
     await db.query("UPDATE assessments SET start_date = COALESCE(start_date, due_date), end_date = COALESCE(end_date, due_date), end_time = COALESCE(end_time, due_time) WHERE start_date IS NULL OR end_date IS NULL OR end_time IS NULL");
-    await db.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
-    await db.query("DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_office_code VARCHAR(10)");
     await db.query("ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_school_code VARCHAR(20)");
     await db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_schools_neis_codes ON schools(neis_office_code, neis_school_code) WHERE neis_office_code IS NOT NULL AND neis_school_code IS NOT NULL");
     await db.query("CREATE TABLE IF NOT EXISTS school_admin_registration_codes (id BIGSERIAL PRIMARY KEY, school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE, code_hash CHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ, created_by VARCHAR(160) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
     await db.query("CREATE INDEX IF NOT EXISTS idx_school_admin_registration_codes_school ON school_admin_registration_codes(school_id, created_at DESC)");
+    await db.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
+    await db.query("DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')");
   } catch (error) {
     console.warn("School code migration skipped; database setup may be required:", error.message);
   }
