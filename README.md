@@ -82,8 +82,8 @@ npm install
 | 변수 | 설명 |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL 연결 문자열 |
-| `SESSION_SECRET` | 충분히 길고 무작위인 세션 비밀값 |
-| `ADMIN_SETUP_KEY` | 학교 관리자 최초 설정용 비밀 키 |
+| `SESSION_SECRET` | 운영 환경에서 32자 이상인 무작위 비밀값 |
+| `ADMIN_SETUP_KEY` | 운영 환경에서 32자 이상인 무작위 최초 설정용 비밀 키 |
 | `NODE_ENV` | 배포 시 `production` |
 | `FRONTEND_URL` | 허용할 프런트엔드 origin |
 | `FRONTEND_URLS` | 추가로 허용할 origin 목록. 여러 주소는 쉼표로 구분 |
