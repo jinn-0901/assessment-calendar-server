@@ -232,7 +232,7 @@ app.post("/api/admin/registration-codes/bootstrap", sensitiveAuthLimiter, async 
     if (!school.rowCount) { await client.query("ROLLBACK"); return res.status(404).json({ error: "학교를 찾을 수 없습니다." }); }
     const code = makeRegistrationCode();
     await client.query(
-      "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE school_id=$1 AND used_at IS NULL AND revoked_at IS NULL",
+      "DELETE FROM school_admin_registration_codes WHERE school_id=$1",
       [schoolId]
     );
     await client.query(
@@ -318,7 +318,7 @@ app.post("/api/admin/registration-codes/:id/revoke", requireAdmin, async (req, r
     const id = positiveInt(req.params.id);
     if (!id) return res.status(400).json({ error: "코드 ID가 올바르지 않습니다." });
     const result = await db.query(
-      "UPDATE school_admin_registration_codes SET revoked_at=NOW() WHERE id=$1 AND school_id=$2 AND used_at IS NULL AND revoked_at IS NULL RETURNING id",
+      "DELETE FROM school_admin_registration_codes WHERE id=$1 AND school_id=$2 AND used_at IS NULL AND revoked_at IS NULL RETURNING id",
       [id, (req.admin || req.session.admin).schoolId]
     );
     if (!result.rowCount) return res.status(404).json({ error: "폐기할 수 있는 코드를 찾을 수 없습니다." });
@@ -827,119 +827,51 @@ app.use((error, req, res, next) => {
 });
 
 
-function seoulDateString(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Seoul",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(date);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
-// March 1 is a Korean public holiday. If it falls on a weekend, the
-// following Monday is the substitute holiday; cleanup runs on the next
-// weekday after the holiday(s).
-function annualAssessmentCleanupDate(year) {
-  const marchFirst = new Date(Date.UTC(year, 2, 1));
-  const marchFirstDay = marchFirst.getUTCDay();
-  const hasSubstituteHoliday = marchFirstDay === 0 || marchFirstDay === 6;
-  const date = new Date(Date.UTC(year, 2, 2));
-
-  while (true) {
-    const day = date.getUTCDay();
-    const isWeekend = day === 0 || day === 6;
-    const isSubstituteHoliday = hasSubstituteHoliday && day === 1;
-    if (!isWeekend && !isSubstituteHoliday) {
-      return date.toISOString().slice(0, 10);
-    }
-    date.setUTCDate(date.getUTCDate() + 1);
-  }
-}
-
-async function runAnnualAssessmentCleanupIfDue() {
-  const today = seoulDateString();
-  const year = Number(today.slice(0, 4));
-  const runDate = annualAssessmentCleanupDate(year);
-  if (today < runDate) return;
-
+async function runDatabaseCleanup() {
   let client;
   try {
     client = await db.pool.connect();
     await client.query("BEGIN");
-    const claim = await client.query(
-      "INSERT INTO assessment_cleanup_runs (school_year, cleanup_date, status) VALUES ($1, $2::date, 'completed') ON CONFLICT (school_year) DO NOTHING RETURNING school_year",
-      [year, runDate]
-    );
-    if (!claim.rowCount) {
-      await client.query("ROLLBACK");
-      return;
-    }
 
-    // Only remove assessments that ended before March 1. Events on or after
-    // March 1 remain, and pending student requests are intentionally untouched.
-    const deleted = await client.query(
-      `DELETE FROM assessments AS a
-       WHERE a.end_date < $1::date
-         AND NOT EXISTS (
-           SELECT 1
-           FROM assessment_requests AS r
-           WHERE r.assessment_id = a.id
-             AND r.status = 'pending'
-         )
-       RETURNING a.id`,
-      [`${year}-03-01`]
+    // Keep only actionable requests; completed request history is not retained.
+    const requests = await client.query(
+      "DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')"
     );
+
+    // Remove expired schedules promptly, except while a pending request refers to them.
+    const assessments = await client.query(
+      "DELETE FROM assessments AS a " +
+      "WHERE a.end_date < ((NOW() AT TIME ZONE 'Asia/Seoul')::date) " +
+      "AND NOT EXISTS (SELECT 1 FROM assessment_requests AS r " +
+      "WHERE r.assessment_id = a.id AND r.status = 'pending') " +
+      "RETURNING a.id"
+    );
+
+    // One-time codes have no value after expiry, use, or revocation.
+    const codes = await client.query(
+      "DELETE FROM school_admin_registration_codes WHERE expires_at <= NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL"
+    );
+
     await client.query("COMMIT");
-    console.log(
-      `Annual assessment cleanup completed for ${year}: ${deleted.rowCount} expired assessment(s) removed.`
-    );
+    if (requests.rowCount || assessments.rowCount || codes.rowCount) {
+      console.log(
+        "Database cleanup: " + assessments.rowCount + " expired assessment(s), " +
+        requests.rowCount + " completed request(s), " + codes.rowCount +
+        " inactive registration code(s) removed."
+      );
+    }
   } catch (error) {
     if (client) await client.query("ROLLBACK").catch(() => {});
-    console.error("Annual assessment cleanup failed:", error.message);
+    console.error("Database cleanup failed:", error.message);
   } finally {
     client?.release();
   }
 }
 
-async function startAnnualAssessmentCleanup() {
-  try {
-    const existing = await db.query("SELECT to_regclass('public.assessment_cleanup_runs') AS table_name");
-    const isFirstInitialization = !existing.rows[0]?.table_name;
-    await db.query(`CREATE TABLE IF NOT EXISTS assessment_cleanup_runs (
-      school_year INTEGER PRIMARY KEY,
-      cleanup_date DATE NOT NULL,
-      status VARCHAR(20) NOT NULL DEFAULT 'completed' CHECK (status IN ('completed', 'skipped')),
-      completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )`);
-    await db.query("ALTER TABLE assessment_cleanup_runs ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'completed'");
-
-    const today = seoulDateString();
-    const year = Number(today.slice(0, 4));
-    const runDate = annualAssessmentCleanupDate(year);
-    // Do not unexpectedly purge old schedules when this feature is first
-    // installed after this year's scheduled date. Future years still run.
-    if (isFirstInitialization && today > runDate) {
-      await db.query(
-        "INSERT INTO assessment_cleanup_runs (school_year, cleanup_date, status) VALUES ($1, $2::date, 'skipped') ON CONFLICT (school_year) DO NOTHING",
-        [year, runDate]
-      );
-      console.log(`Annual assessment cleanup initialized after ${runDate}; first run is deferred to next school year.`);
-    } else {
-      // If an already-initialized service was asleep through the target date,
-      // catch up when it next wakes. The yearly record prevents duplicate runs.
-      await runAnnualAssessmentCleanupIfDue();
-    }
-
-    setInterval(() => {
-      runAnnualAssessmentCleanupIfDue().catch((error) => {
-        console.error("Annual assessment cleanup check failed:", error.message);
-      });
-    }, 60 * 1000);
-  } catch (error) {
-    console.error("Could not initialize annual assessment cleanup:", error.message);
-  }
+function startDatabaseCleanup() {
+  // Clean at startup and retry every five minutes while the service is running.
+  runDatabaseCleanup();
+  setInterval(runDatabaseCleanup, 5 * 60 * 1000);
 }
 
 async function startServer() {
@@ -958,13 +890,12 @@ async function startServer() {
     await db.query("CREATE TABLE IF NOT EXISTS school_admin_registration_codes (id BIGSERIAL PRIMARY KEY, school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE, code_hash CHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ, created_by VARCHAR(160) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
     await db.query("CREATE INDEX IF NOT EXISTS idx_school_admin_registration_codes_school ON school_admin_registration_codes(school_id, created_at DESC)");
     await db.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
-    await db.query("DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')");
   } catch (error) {
     console.error("Database migration failed; server startup aborted:", error.message);
     process.exit(1);
   }
   app.listen(port, () => console.log(`Assessment Calendar server listening on port ${port}`));
-  startAnnualAssessmentCleanup();
+  startDatabaseCleanup();
 }
 
 startServer();
