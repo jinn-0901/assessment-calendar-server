@@ -121,7 +121,7 @@ API 기본 주소 뒤에 아래 경로를 붙여 요청합니다.
 | --- | --- | --- |
 | `GET` | `/api/health` | 서버 상태 확인 |
 | `GET` | `/api/me` | 현재 인증 상태 확인 |
-| `POST` | `/api/admin/setup` | 관리자 최초 설정 |
+| `POST` | `/api/admin/registration-codes/bootstrap` | 운영자 인증 후 최초 등록 코드 발급 |\n| `POST` | `/api/admin/register` | 일회용 코드로 학교 관리자 등록 |
 | `POST` | `/api/admin/login` | 관리자 로그인 |
 | `POST` | `/api/admin/logout` | 관리자 로그아웃 |
 | `GET` | `/api/admin/requests` | 학교의 신청 목록 조회 |
@@ -136,18 +136,25 @@ API 기본 주소 뒤에 아래 경로를 붙여 요청합니다.
 
 ## 학교 관리자 최초 설정
 
-1. 웹사이트에서 학교를 등록합니다.
+1. 웹사이트에서 나이스 검색으로 학교를 등록합니다.
 2. 서버 환경 변수에 `ADMIN_SETUP_KEY`를 설정합니다.
 3. `GET /api/schools` 응답에서 해당 학교의 ID를 확인합니다.
-4. 아래 요청의 예시 값을 실제 환경에 맞게 바꿔 실행합니다.
+4. 운영자 키로 해당 학교의 일회용 등록 코드를 발급합니다.
+5. 발급된 코드를 사용해 관리자 계정을 등록합니다.
 
 ```bash
-curl -X POST "$API_URL/api/admin/setup" \
+# 1. 운영자 전용 일회용 등록 코드 발급
+curl -X POST "$API_URL/api/admin/registration-codes/bootstrap" \
   -H "Content-Type: application/json" \
-  -d '{"setupKey":"YOUR_ADMIN_SETUP_KEY","schoolId":1,"password":"YOUR_LONG_ADMIN_PASSWORD"}'
+  -d '{"setupKey":"YOUR_ADMIN_SETUP_KEY","schoolId":1}'
+
+# 2. 위 응답의 registrationCode를 사용해 관리자 등록
+curl -X POST "$API_URL/api/admin/register" \
+  -H "Content-Type: application/json" \
+  -d '{"schoolId":1,"registrationCode":"PASTE_ONE_TIME_CODE","password":"YOUR_LONG_ADMIN_PASSWORD"}'
 ```
 
-관리자 비밀번호는 최소 12자여야 합니다. 위 값은 예시이며, 실제 설정 키나 비밀번호를 문서·채팅·커밋에 공개하지 마세요.
+관리자 비밀번호는 최소 12자여야 합니다. 등록 코드는 24시간 동안 유효하며 한 번만 사용할 수 있습니다. 실제 설정 키, 등록 코드 또는 비밀번호를 문서·채팅·커밋에 공개하지 마세요.
 
 ## 연간 일정 자동 정리
 
