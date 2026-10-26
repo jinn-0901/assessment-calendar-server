@@ -81,7 +81,7 @@ npm install
 
 | 변수 | 설명 |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL 연결 문자열 |
+| `DATABASE_URL` | PostgreSQL 연결 문자열 |\n| `DATABASE_SSL_CA` | 선택 사항. PostgreSQL 제공자의 PEM CA 인증서. 설정하면 TLS 인증서 검증을 활성화 |
 | `SESSION_SECRET` | 운영 환경에서 32자 이상인 무작위 비밀값 |
 | `ADMIN_SETUP_KEY` | 운영 환경에서 32자 이상인 무작위 최초 설정용 비밀 키 |
 | `NODE_ENV` | 배포 시 `production` |
@@ -208,5 +208,5 @@ curl -X POST "$API_URL/api/admin/register" \
 - 관리자 로그인·최초 등록 코드 발급·관리자 등록·비밀번호 변경에는 별도 요청 제한이 적용됩니다.
 - 관리자 토큰은 24시간 후 만료됩니다. 비밀번호 변경, 관리자 재등록, 로그아웃은 인증 버전을 변경해 이전 토큰과 세션을 무효화합니다.
 - 운영 환경의 변경 요청은 허용된 프런트엔드 출처를 검증합니다. `FRONTEND_URL`과 `FRONTEND_URLS`에는 origin만 등록하고, 경로나 와일드카드를 넣지 않습니다.
-- 데이터베이스 마이그레이션에 실패하면 서버는 시작하지 않습니다.
+- 데이터베이스 마이그레이션에 실패하면 서버는 시작하지 않습니다. TLS 인증서 검증을 엄격하게 하려면 제공자의 CA 인증서를 `DATABASE_SSL_CA`에 설정합니다. CA가 없는 경우 Render 호환성을 위해 인증서 검증이 비활성화되므로 이 설정을 보안 운영 체크리스트에 포함하세요.
 - 보안은 코드만으로 완성되지 않습니다. Render 환경 변수, PostgreSQL 접근 권한·백업, GitHub 비밀 정보, 배포 설정 및 의존성 업데이트도 별도로 점검해야 합니다.
