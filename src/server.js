@@ -135,8 +135,9 @@ function makeRegistrationCode() {
 // First code: issued by the service operator after verifying the school's representative.
 // ADMIN_SETUP_KEY is only an operator credential; it is not a school-wide shared admin password.
 app.post("/api/admin/registration-codes/bootstrap", async (req, res, next) => {
-  const client = await db.pool.connect();
+  let client;
   try {
+    client = await db.pool.connect();
     const setupKey = typeof req.body.setupKey === "string" ? req.body.setupKey : "";
     const schoolId = positiveInt(req.body.schoolId);
     if (!process.env.ADMIN_SETUP_KEY || setupKey !== process.env.ADMIN_SETUP_KEY) {
@@ -158,15 +159,16 @@ app.post("/api/admin/registration-codes/bootstrap", async (req, res, next) => {
     await client.query("COMMIT");
     res.status(201).json({ schoolId, registrationCode: code, expiresInHours: 24 });
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (client) await client.query("ROLLBACK").catch(() => {});
     next(error);
-  } finally { client.release(); }
+  } finally { client?.release(); }
 });
 
 // A valid one-time code creates the first administrator or resets/transfers the single school administrator account.
 app.post("/api/admin/register", async (req, res, next) => {
-  const client = await db.pool.connect();
+  let client;
   try {
+    client = await db.pool.connect();
     const schoolId = positiveInt(req.body.schoolId);
     const code = typeof req.body.registrationCode === "string" ? req.body.registrationCode.trim().toUpperCase() : "";
     const password = req.body.password;
@@ -187,16 +189,17 @@ app.post("/api/admin/register", async (req, res, next) => {
     await client.query("COMMIT");
     res.status(201).json({ ok: true, message: "학교 관리자 등록이 완료됐습니다." });
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (client) await client.query("ROLLBACK").catch(() => {});
     if (error.code === "23505") return res.status(409).json({ error: "등록 코드가 이미 사용되었습니다. 새 코드를 요청해 주세요." });
     next(error);
-  } finally { client.release(); }
+  } finally { client?.release(); }
 });
 
 // A logged-in school administrator can issue a short-lived one-time code for a verified school representative.
 app.post("/api/admin/registration-codes", requireAdmin, async (req, res, next) => {
-  const client = await db.pool.connect();
+  let client;
   try {
+    client = await db.pool.connect();
     const schoolId = Number((req.admin || req.session.admin).schoolId);
     await client.query("BEGIN");
     await client.query("DELETE FROM school_admin_registration_codes WHERE expires_at<=NOW() OR used_at IS NOT NULL OR revoked_at IS NOT NULL");
@@ -212,9 +215,9 @@ app.post("/api/admin/registration-codes", requireAdmin, async (req, res, next) =
     await client.query("COMMIT");
     res.status(201).json({ registrationCode: code, expiresInHours: 24 });
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (client) await client.query("ROLLBACK").catch(() => {});
     next(error);
-  } finally { client.release(); }
+  } finally { client?.release(); }
 });
 
 app.get("/api/admin/registration-codes", requireAdmin, async (req, res, next) => {
@@ -307,8 +310,9 @@ app.get("/api/admin/requests", requireAdmin, async (req, res, next) => {
 });
 
 app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next) => {
-  const client = await db.pool.connect();
+  let client;
   try {
+    client = await db.pool.connect();
     const id = positiveInt(req.params.id);
     const decision = req.body.decision;
     if (!id || !["approve","reject"].includes(decision)) return res.status(400).json({ error: "승인 요청이 올바르지 않습니다." });
@@ -337,10 +341,10 @@ app.post("/api/admin/requests/:id/decision", requireAdmin, async (req, res, next
     await client.query("COMMIT");
     res.json({ ok: true });
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (client) await client.query("ROLLBACK").catch(() => {});
     if (error.code === "P0001") return res.status(400).json({ error: "학급과 과목은 같은 학교에 속해야 합니다." });
     next(error);
-  } finally { client.release(); }
+  } finally { client?.release(); }
 });
 
 
@@ -754,8 +758,9 @@ async function runAnnualAssessmentCleanupIfDue() {
   const runDate = annualAssessmentCleanupDate(year);
   if (today < runDate) return;
 
-  const client = await db.pool.connect();
+  let client;
   try {
+    client = await db.pool.connect();
     await client.query("BEGIN");
     const claim = await client.query(
       "INSERT INTO assessment_cleanup_runs (school_year, cleanup_date, status) VALUES ($1, $2::date, 'completed') ON CONFLICT (school_year) DO NOTHING RETURNING school_year",
@@ -785,7 +790,7 @@ async function runAnnualAssessmentCleanupIfDue() {
       `Annual assessment cleanup completed for ${year}: ${deleted.rowCount} expired assessment(s) removed.`
     );
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (client) await client.query("ROLLBACK").catch(() => {});
     console.error("Annual assessment cleanup failed:", error.message);
   } finally {
     client.release();
