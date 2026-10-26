@@ -108,3 +108,17 @@ ALTER TABLE schools ADD COLUMN IF NOT EXISTS neis_school_code VARCHAR(20);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schools_neis_codes
   ON schools(neis_office_code, neis_school_code)
   WHERE neis_office_code IS NOT NULL AND neis_school_code IS NOT NULL;
+
+-- One-time school administrator registration codes. Only hashes are stored.
+CREATE TABLE IF NOT EXISTS school_admin_registration_codes (
+  id BIGSERIAL PRIMARY KEY,
+  school_id BIGINT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  code_hash CHAR(64) NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  created_by VARCHAR(160) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_school_admin_registration_codes_school
+  ON school_admin_registration_codes(school_id, created_at DESC);
