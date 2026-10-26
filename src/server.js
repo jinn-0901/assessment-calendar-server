@@ -10,6 +10,10 @@ const db = require("./db");
 const app = express();
 const isProduction = process.env.NODE_ENV === "production";
 const port = process.env.PORT || 3000;
+const allowedOrigins = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "")
+  .split(",")
+  .map((origin) => origin.trim().replace(/\/$/, ""))
+  .filter(Boolean);
 
 if (isProduction) {
   if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
@@ -30,11 +34,6 @@ if (isProduction) {
   }
 }
 if (isProduction) app.set("trust proxy", 1);
-
-const allowedOrigins = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || "")
-  .split(",")
-  .map((origin) => origin.trim().replace(/\/$/, ""))
-  .filter(Boolean);
 
 // CORS alone does not stop cross-site HTML form submissions. Validate origins
 // for every unsafe production request before dispatching API handlers.
