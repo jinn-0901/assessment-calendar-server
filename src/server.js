@@ -536,22 +536,50 @@ function isValidDateString(value) {
 
 function validNeisDate(value) { return isValidDateString(value) ? value.replace(/-/g, "") : null; }
 
+const NEIS_CACHE_TTL_MS = 2 * 60 * 1000;
+const NEIS_CACHE_MAX_ENTRIES = 300;
+const neisRowsCache = new Map();
+const neisRowsInFlight = new Map();
+
 async function fetchNeisRows(endpoint, params) {
   const key = process.env.NEIS_API_KEY;
   if (!key) { const error = new Error("나이스 API 인증키가 서버에 설정되지 않았어요."); error.status = 503; throw error; }
-  const query = new URLSearchParams({ KEY: key, Type: "json", pIndex: "1", pSize: "1000", ...params });
-  const response = await fetch("https://open.neis.go.kr/hub/" + endpoint + "?" + query.toString(), { signal: AbortSignal.timeout(10000) });
-  if (!response.ok) { const error = new Error("나이스 데이터를 불러오지 못했어요."); error.status = 502; throw error; }
-  const payload = await response.json();
-  const rows = payload?.[endpoint]?.[1]?.row || [];
-  const result = payload?.RESULT;
-  if (!rows.length && result?.CODE && result.CODE !== "INFO-200") {
-    if (result.CODE === "INFO-200") return [];
-    const error = new Error("나이스 조회 결과: " + (result.MESSAGE || result.CODE));
-    error.status = 502;
-    throw error;
+
+  // Reuse recent results and coalesce simultaneous identical requests. Keep this
+  // cache short-lived and bounded so timetable/meal changes do not stay stale.
+  const cacheKey = endpoint + ":" + JSON.stringify(params);
+  const now = Date.now();
+  const cached = neisRowsCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.rows;
+  if (cached) neisRowsCache.delete(cacheKey);
+  if (neisRowsInFlight.has(cacheKey)) return neisRowsInFlight.get(cacheKey);
+
+  const request = (async () => {
+    const query = new URLSearchParams({ KEY: key, Type: "json", pIndex: "1", pSize: "1000", ...params });
+    const response = await fetch("https://open.neis.go.kr/hub/" + endpoint + "?" + query.toString(), { signal: AbortSignal.timeout(10000) });
+    if (!response.ok) { const error = new Error("나이스 데이터를 불러오지 못했어요."); error.status = 502; throw error; }
+    const payload = await response.json();
+    const rows = payload?.[endpoint]?.[1]?.row || [];
+    const result = payload?.RESULT;
+    if (!rows.length && result?.CODE && result.CODE !== "INFO-200") {
+      const error = new Error("나이스 조회 결과: " + (result.MESSAGE || result.CODE));
+      error.status = 502;
+      throw error;
+    }
+
+    neisRowsCache.set(cacheKey, { rows, expiresAt: Date.now() + NEIS_CACHE_TTL_MS });
+    while (neisRowsCache.size > NEIS_CACHE_MAX_ENTRIES) {
+      neisRowsCache.delete(neisRowsCache.keys().next().value);
+    }
+    return rows;
+  })();
+
+  neisRowsInFlight.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    neisRowsInFlight.delete(cacheKey);
   }
-  return rows;
 }
 
 async function getNeisSchool(schoolId) {
@@ -590,11 +618,15 @@ app.get("/api/neis/timetable", rateLimit({ windowMs: 15 * 60 * 1000, limit: 120,
       const d = new Date(startDate); d.setDate(startDate.getDate()+i);
       return String(d.getFullYear()) + String(d.getMonth()+1).padStart(2,"0") + String(d.getDate()).padStart(2,"0");
     });
-    const timetable = [];
-    for (const date of dates) {
+    const timetable = await Promise.all(dates.map(async (date) => {
       const rows = await fetchNeisRows(schoolKind, { ...school, ALL_TI_YMD: date, GRADE: grade, CLASS_NM: className });
-      timetable.push({ date, lessons: rows.map(row => ({ period: Number(row.PERIO), subject: String(row.ITRT_CNTNT || "").trim(), classroom: String(row.CLRM_NM || "").trim() })).filter(row => Number.isInteger(row.period) && row.period > 0).sort((a,b) => a.period-b.period) });
-    }
+      return {
+        date,
+        lessons: rows.map(row => ({ period: Number(row.PERIO), subject: String(row.ITRT_CNTNT || "").trim(), classroom: String(row.CLRM_NM || "").trim() }))
+          .filter(row => Number.isInteger(row.period) && row.period > 0)
+          .sort((a,b) => a.period-b.period)
+      };
+    }));
     res.json({ timetable });
   } catch (error) { res.status(error.status || 502).json({ error: error.message || "나이스 주간 시간표를 불러오지 못했어요." }); }
 });
@@ -827,7 +859,12 @@ app.use((error, req, res, next) => {
 });
 
 
+let databaseCleanupRunning = false;
+
 async function runDatabaseCleanup() {
+  // The startup run and five-minute interval must not run the same deletes at once.
+  if (databaseCleanupRunning) return;
+  databaseCleanupRunning = true;
   let client;
   try {
     client = await db.pool.connect();
@@ -865,6 +902,7 @@ async function runDatabaseCleanup() {
     console.error("Database cleanup failed:", error.message);
   } finally {
     client?.release();
+    databaseCleanupRunning = false;
   }
 }
 
