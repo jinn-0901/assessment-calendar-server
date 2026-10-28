@@ -875,10 +875,13 @@ async function runDatabaseCleanup() {
       "DELETE FROM assessment_requests WHERE status IN ('approved', 'rejected')"
     );
 
-    // Remove expired schedules promptly, except while a pending request refers to them.
+    // Remove only schedules from before the current school year, and only after March 1.
+    // Keep completed schedules from the current school year available for reference.
     const assessments = await client.query(
       "DELETE FROM assessments AS a " +
-      "WHERE a.end_date < ((NOW() AT TIME ZONE 'Asia/Seoul')::date) " +
+      "WHERE ((NOW() AT TIME ZONE 'Asia/Seoul')::date >= " +
+      "make_date(EXTRACT(YEAR FROM (NOW() AT TIME ZONE 'Asia/Seoul'))::int, 3, 1)) " +
+      "AND a.end_date < make_date(EXTRACT(YEAR FROM (NOW() AT TIME ZONE 'Asia/Seoul'))::int, 3, 1) " +
       "AND NOT EXISTS (SELECT 1 FROM assessment_requests AS r " +
       "WHERE r.assessment_id = a.id AND r.status = 'pending') " +
       "RETURNING a.id"
